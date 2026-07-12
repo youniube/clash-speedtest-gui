@@ -98,3 +98,4 @@
 - 2026-07-12 用户取消手机 Web 前端与 Cloudflare Tunnel 方向；本轮未创建手机端代码、账号、域名或外部配置，后续不再把该方向作为待办。
 - 2026-07-12 Git 与敏感配置收口：空的无效 `.git` 已替换为本地有效仓库，根目录真实 `cs.yaml`、`wa.yaml` 在保持内容不变的前提下迁移到 `%LOCALAPPDATA%\ClashSpeedTestGUI\private-inputs\`；`wa.yaml` 的此前修改按保留现状处理。`.gitignore` 排除真实 YAML、默认输出、EXE 和测试产物，避免凭据或构建产物进入版本历史。
 - 2026-07-12 UI 节点管理夹具已实现 `-manage-config`，支持按稳定 ID 重命名/删除并重写沙箱 YAML；`test-all.ps1` 新增“测速导出、重命名、删除、重新读取”契约回归且完整测试通过。Windows 捕获接口仍返回 `SetIsBorderRequired 0x80004002`，因此没有把鼠标点击/弹窗视觉层伪报为自动化通过。
+- 2026-07-12 GitHub 调研确认 `SetIsBorderRequired 0x80004002` 来自 Codex Computer Use 在 Windows 10 build 19045 上把较新的可选边框属性当成必需步骤，并非本项目 GUI 缺陷；OpenAI Codex 相关问题仍处于开放状态。替代优先级确定为：本项目操作回归采用 C# FlaUI/UI Automation，截图使用 `PrintWindow(PW_RENDERFULLCONTENT)` 后回退屏幕区域 `BitBlt`，视觉复核继续允许 PixPin；不修改会随插件更新被覆盖的闭源助手二进制。完整开源 CUA 参考位置为 `github.com/trycua/cua`，其 Windows 实现会忽略边框设置失败并提供 WGC、PrintWindow、BitBlt 回退链，但对本项目而言引入整套平台过重。
