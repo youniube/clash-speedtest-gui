@@ -24,6 +24,10 @@ namespace ClashSpeedTestGUI.UiFixtures
         private const int WindowMessageKeyDown = 0x0100;
         private const int WindowMessageKeyUp = 0x0101;
         private const int ButtonMessageClick = 0x00F5;
+        private const int VirtualKeyEscape = 0x1B;
+        private const int VirtualKeyEnd = 0x23;
+        private const int VirtualKeyF5 = 0x74;
+        private const int VirtualKeyF6 = 0x75;
         private static string tracePath;
 
         [STAThread]
@@ -60,8 +64,37 @@ namespace ClashSpeedTestGUI.UiFixtures
                     SetText(mainWindow, "ConfigSourceInput", options.InputPath);
                     SetText(mainWindow, "OutputPathInput", options.OutputPath);
                     Trace("inputs set");
-                    InvokeButton(mainWindow, "StartSpeedTestButton");
-                    Trace("speed test invoked");
+
+                    WriteControl(options.SandboxPath, "speed-mode.txt", "gated-success");
+                    DeleteSignal(options.SandboxPath, "speed-started.json");
+                    DeleteSignal(options.SandboxPath, "speed-completed.json");
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyF5);
+                    WaitForSignal(options.SandboxPath, "speed-started.json");
+                    Trace("gated speed test started through F5");
+                    AssertEnabled(mainWindow, "ConfigSourceInput", false);
+                    AssertEnabled(mainWindow, "OutputPathInput", false);
+                    AssertEnabled(mainWindow, "SpeedPresetCombo", false);
+                    AssertEnabled(mainWindow, "StartSpeedTestButton", false);
+                    AssertEnabled(mainWindow, "StopTaskButton", true);
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyEscape);
+                    WaitForEnabled(startButton, "Esc did not return the speed test UI to idle");
+                    WaitForDisabled(FindById(mainWindow, "StopTaskButton"),
+                        "stop button remained enabled after speed cancellation");
+                    AssertElementTextContains(mainWindow, "StatusText", "测速已停止");
+                    if (File.Exists(options.OutputPath)
+                        || File.Exists(Path.Combine(options.SandboxPath,
+                            "signals", "speed-completed.json")))
+                    {
+                        throw new InvalidOperationException(
+                            "Canceled speed test unexpectedly committed an output.");
+                    }
+                    Trace("speed cancellation and control locking passed");
+
+                    WriteControl(options.SandboxPath, "speed-mode.txt", "success");
+                    DeleteSignal(options.SandboxPath, "speed-started.json");
+                    DeleteSignal(options.SandboxPath, "speed-completed.json");
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyF5);
+                    Trace("successful speed test invoked through F5");
 
                     WaitUntil(delegate
                     {
@@ -82,6 +115,64 @@ namespace ClashSpeedTestGUI.UiFixtures
                     Trace("speed UI completed");
                     AssertFileContains(options.OutputPath, "port: 10001", true);
                     AssertFileContains(options.OutputPath, "port: 10002", true);
+
+                    SelectComboBox(mainWindow, "StatusFilter", "失败");
+                    AssertComboSelected(mainWindow, "StatusFilter", "失败");
+                    SelectComboBox(mainWindow, "StatusFilter", "全部");
+                    SelectComboBox(mainWindow, "ProtocolFilter", "Trojan");
+                    AssertComboSelected(mainWindow, "ProtocolFilter", "Trojan");
+                    SelectComboBox(mainWindow, "ProtocolFilter", "全部");
+                    Trace("list filters passed");
+
+                    ClickGridHeaderByIndex(resultGrid, 3);
+                    ClickGridHeaderByIndex(resultGrid, 3);
+                    ClickGridHeaderByIndex(resultGrid, 3);
+                    Trace("list sorting passed");
+
+                    WriteControl(options.SandboxPath, "region-mode.txt", "block-after-one");
+                    DeleteSignal(options.SandboxPath, "region-first-event.json");
+                    DeleteSignal(options.SandboxPath, "region-completed.json");
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyF6);
+                    WaitForSignal(options.SandboxPath, "region-first-event.json");
+                    AssertEnabled(mainWindow, "ConfigSourceInput", false);
+                    AssertEnabled(mainWindow, "StartSpeedTestButton", false);
+                    AssertEnabled(mainWindow, "StopTaskButton", true);
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyEscape);
+                    WaitForEnabled(startButton, "Esc did not cancel the region query");
+                    WaitForDisabled(FindById(mainWindow, "StopTaskButton"),
+                        "stop button remained enabled after region cancellation");
+                    AssertElementTextContains(mainWindow, "StatusText", "查询前地区信息已恢复");
+                    AssertComboItems(mainWindow, "RegionFilter", new[]
+                    {
+                        "全部", "US 美国", "JP 日本", "HK 香港", "SG 新加坡", "TW 台湾"
+                    });
+                    Trace("region cancellation rollback passed");
+
+                    WriteControl(options.SandboxPath, "region-mode.txt", "all-success");
+                    DeleteSignal(options.SandboxPath, "region-first-event.json");
+                    DeleteSignal(options.SandboxPath, "region-completed.json");
+                    PostKey(guiProcess.MainWindowHandle, VirtualKeyF6);
+                    WaitForSignal(options.SandboxPath, "region-completed.json");
+                    WaitForElementTextContains(mainWindow, "StatusText", "出口地区查询完成：成功 2",
+                        "successful region query was not committed");
+                    AssertComboContains(mainWindow, "RegionFilter", "HK");
+                    AssertComboContains(mainWindow, "RegionFilter", "US");
+                    SelectComboBoxByPrefix(mainWindow, "RegionFilter", "HK");
+                    AssertComboSelectedByPrefix(mainWindow, "RegionFilter", "HK");
+                    SelectComboBox(mainWindow, "RegionFilter", "全部");
+                    Trace("successful region query and filter passed");
+
+                    WriteControl(options.SandboxPath, "region-mode.txt", "malformed");
+                    DeleteSignal(options.SandboxPath, "region-first-event.json");
+                    DeleteSignal(options.SandboxPath, "region-completed.json");
+                    InvokeGridContextCommand(resultGrid, 0, 5);
+                    WaitForNativeWindow(guiProcess.Id, "出口地区查询失败");
+                    DismissDialog(guiProcess.Id, "出口地区查询失败");
+                    WaitForEnabled(startButton, "malformed region query did not return to idle");
+                    AssertElementTextContains(mainWindow, "StatusText", "查询前地区信息已恢复");
+                    AssertComboContains(mainWindow, "RegionFilter", "HK");
+                    AssertComboContains(mainWindow, "RegionFilter", "US");
+                    Trace("malformed region rollback passed");
 
                     DeleteSignal(options.SandboxPath, "manage-config-completed.json");
                     Trace("before rename row focus");
@@ -279,6 +370,179 @@ namespace ClashSpeedTestGUI.UiFixtures
             });
         }
 
+        private static void AssertEnabled(
+            AutomationElement root, string automationId, bool expected)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Control was not found: " + automationId);
+            if (element.IsEnabled != expected)
+                throw new InvalidOperationException(
+                    automationId + " enabled state was " + element.IsEnabled
+                    + ", expected " + expected + ".");
+        }
+
+        private static void AssertElementTextContains(
+            AutomationElement root, string automationId, string expected)
+        {
+            if (!ElementTextContains(root, automationId, expected))
+                throw new InvalidOperationException(
+                    automationId + " did not contain expected text '" + expected + "'.");
+        }
+
+        private static void WaitForElementTextContains(
+            AutomationElement root, string automationId, string expected, string failure)
+        {
+            WaitUntil(delegate
+            {
+                return ElementTextContains(root, automationId, expected);
+            }, failure);
+        }
+
+        private static bool ElementTextContains(
+            AutomationElement root, string automationId, string expected)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element != null && (element.Name ?? "")
+                .IndexOf(expected, StringComparison.Ordinal) >= 0)
+                return true;
+
+            AutomationElement statusStrip = FindById(root, "StatusStrip");
+            if (statusStrip == null) return false;
+            if ((statusStrip.Name ?? "").IndexOf(expected, StringComparison.Ordinal) >= 0)
+                return true;
+            foreach (AutomationElement child in statusStrip.FindAllDescendants())
+            {
+                if ((child.Name ?? "").IndexOf(expected, StringComparison.Ordinal) >= 0)
+                    return true;
+            }
+            return false;
+        }
+
+        private static void SelectComboBox(
+            AutomationElement root, string automationId, string value)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            element.AsComboBox().Select(value);
+        }
+
+        private static void SelectComboBoxByPrefix(
+            AutomationElement root, string automationId, string prefix)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            ComboBox combo = element.AsComboBox();
+            AutomationElement item = null;
+            foreach (AutomationElement candidate in combo.Items)
+            {
+                if ((candidate.Name ?? "").StartsWith(prefix, StringComparison.Ordinal))
+                {
+                    item = candidate;
+                    break;
+                }
+            }
+            if (item == null)
+                throw new InvalidOperationException(
+                    automationId + " did not contain an item starting with " + prefix + ".");
+            combo.Select(item.Name);
+        }
+
+        private static void AssertComboItems(
+            AutomationElement root, string automationId, string[] expected)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            AutomationElement[] items = element.AsComboBox().Items;
+            if (items.Length != expected.Length)
+                throw new InvalidOperationException(
+                    automationId + " contained " + items.Length
+                    + " items, expected " + expected.Length + ".");
+            for (int index = 0; index < expected.Length; index++)
+            {
+                if (!string.Equals(items[index].Name, expected[index], StringComparison.Ordinal))
+                    throw new InvalidOperationException(
+                        automationId + " item " + index + " was '" + items[index].Name
+                        + "', expected '" + expected[index] + "'.");
+            }
+        }
+
+        private static void AssertComboContains(
+            AutomationElement root, string automationId, string prefix)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            foreach (AutomationElement item in element.AsComboBox().Items)
+            {
+                if ((item.Name ?? "").StartsWith(prefix, StringComparison.Ordinal)) return;
+            }
+            throw new InvalidOperationException(
+                automationId + " did not contain an item starting with " + prefix + ".");
+        }
+
+        private static void ClickGridHeaderByIndex(AutomationElement grid, int columnIndex)
+        {
+            int[] weights = { 45, 220, 100, 100, 100, 100, 130, 100 };
+            if (columnIndex < 0 || columnIndex >= weights.Length)
+                throw new ArgumentOutOfRangeException("columnIndex");
+            Rectangle bounds = grid.BoundingRectangle;
+            if (bounds.Width <= 0 || bounds.Height <= 0)
+                throw new InvalidOperationException("Result grid bounds are invalid.");
+            int totalWeight = 0;
+            int precedingWeight = 0;
+            for (int index = 0; index < weights.Length; index++)
+            {
+                totalWeight += weights[index];
+                if (index < columnIndex) precedingWeight += weights[index];
+            }
+            int usableWidth = Math.Max(1, bounds.Width - 20);
+            int x = bounds.Left + (usableWidth * precedingWeight / totalWeight)
+                + (usableWidth * weights[columnIndex] / totalWeight / 2);
+            int y = bounds.Top + Math.Max(8, Math.Min(14, bounds.Height / 20));
+            grid.Focus();
+            Mouse.LeftClick(new Point(x, y));
+            Thread.Sleep(150);
+        }
+
+        private static void AssertComboSelected(
+            AutomationElement root, string automationId, string expected)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            AutomationElement selected = element.AsComboBox().SelectedItem;
+            string actual = selected == null ? "" : selected.Name ?? "";
+            if (!string.Equals(actual.Trim(), expected, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    automationId + " selected '" + actual.Trim()
+                    + "', expected '" + expected + "'.");
+        }
+
+        private static void AssertComboSelectedByPrefix(
+            AutomationElement root, string automationId, string expectedPrefix)
+        {
+            AutomationElement element = FindById(root, automationId);
+            if (element == null)
+                throw new InvalidOperationException(
+                    "Combo box was not found: " + automationId);
+            AutomationElement selected = element.AsComboBox().SelectedItem;
+            string actual = selected == null ? "" : selected.Name ?? "";
+            if (!actual.StartsWith(expectedPrefix, StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    automationId + " selected '" + actual
+                    + "', expected prefix '" + expectedPrefix + "'.");
+        }
+
         private static void SetText(AutomationElement root, string automationId, string value)
         {
             AutomationElement element = FindById(root, automationId);
@@ -311,6 +575,8 @@ namespace ClashSpeedTestGUI.UiFixtures
             Trace("grid click bounds=" + bounds.ToString()
                 + " scale=" + scale.ToString("0.###")
                 + " point=" + point.ToString());
+            grid.Focus();
+            Thread.Sleep(100);
             IntPtr mainHandle = GetForegroundWindow();
             uint processId;
             GetWindowThreadProcessId(mainHandle, out processId);
@@ -323,6 +589,12 @@ namespace ClashSpeedTestGUI.UiFixtures
                 return menuHandle != IntPtr.Zero;
             }, "context menu window was not found");
             Trace("context menu handle=" + menuHandle.ToString());
+            if (commandIndex == 5)
+            {
+                PostKey(menuHandle, VirtualKeyEnd);
+                PostKey(menuHandle, (int)VirtualKeyShort.RETURN);
+                return;
+            }
             NativeRect menuRect;
             if (!GetWindowRect(menuHandle, out menuRect))
                 throw new InvalidOperationException("Could not read context menu bounds.");
@@ -378,6 +650,13 @@ namespace ClashSpeedTestGUI.UiFixtures
             if (File.Exists(path)) File.Delete(path);
         }
 
+        private static void WriteControl(
+            string sandboxPath, string fileName, string value)
+        {
+            File.WriteAllText(Path.Combine(sandboxPath, "control", fileName),
+                value, new System.Text.UTF8Encoding(false));
+        }
+
         private static void WaitForSignal(string sandboxPath, string fileName)
         {
             string path = Path.Combine(sandboxPath, "signals", fileName);
@@ -415,6 +694,13 @@ namespace ClashSpeedTestGUI.UiFixtures
         private static void WaitForEnabled(AutomationElement element, string failure)
         {
             WaitUntil(delegate { return element.IsAvailable && element.IsEnabled; }, failure);
+        }
+
+        private static void WaitForDisabled(AutomationElement element, string failure)
+        {
+            if (element == null)
+                throw new InvalidOperationException("Control was not found before disabled wait.");
+            WaitUntil(delegate { return element.IsAvailable && !element.IsEnabled; }, failure);
         }
 
         private static void Trace(string message)

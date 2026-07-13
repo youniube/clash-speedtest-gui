@@ -12,7 +12,7 @@ GUI 只需要以下三个文件放在同一目录：
 
 `clash-speedtest.exe` 是保留的上游命令行程序，GUI 不依赖它。
 
-1. 粘贴订阅地址、单节点链接、多行节点列表，或选择本地 YAML 文件。批量粘贴时每行一个节点。
+1. 粘贴订阅地址、单节点链接或选择本地 YAML 文件。多个输入必须每行一个；不使用逗号分隔，因此 URL、Windows 文件名和节点参数中的逗号会原样保留。
 2. 选择测速方案，第一次使用建议选择“均衡（推荐）”。
 3. 点击“开始测速”。
 4. 完成后可复制节点 URL、Clash Meta 或节点名称；按 `F2` 可重命名节点，按 `Delete` 可从本地结果中删除已导出的节点。列表上方还可按状态、延迟、协议和已查询的出口国家组合筛选，也可以手动查询有效节点的出口地区。
@@ -29,6 +29,12 @@ GUI 只需要以下三个文件放在同一目录：
 流量按节点计算。例如 40 个节点使用均衡方案，理论上最多约使用 800MB；实际用量可能因失败或超时更低。
 程序会强制限制每条下载连接实际读取的字节数，即使自定义服务器忽略 `Range` 也不会继续读取完整文件。深度模式必须使用不带文件路径或查询参数、且支持 `/__down` 与 `/__up` 的测速服务；默认直接下载地址只支持快速和均衡模式，程序会在开始前明确阻止不兼容的深度测试。
 
+测速分为两阶段：先并发进行低流量 HTTP 探测，淘汰不可达或延迟超限的节点；`download` / `full` 模式再让候选节点逐个完成吞吐测试。每个节点内部仍可使用 1–16 条连接，这能避免待测节点彼此争抢本机可用带宽；其他应用仍可能影响测速结果。这样结果更稳定，代价是候选节点较多时总耗时会增加。
+
+每个节点会先做 1 次不计入统计的预热，再做 5 次正式 GET 探测，正式样本之间间隔 100ms。直链使用 `Range: bytes=0-0`，无路径测速服务使用 `/__down?bytes=1`；延迟取成功正式样本的中位数，“HTTP 探测失败率”是 5 次正式 HTTP 请求中的失败比例，不是 ICMP/UDP 丢包率。
+
+达到传输超时时，界面会保留实际字节数和墙钟时间计算出的部分速度，并标记“传输未完成”；未完成计划字节数的节点不会作为有效节点导出，不会再把已有的有效采样简单显示为 `0 MB/s`。
+
 测速失败、协议输出不完整、没有节点通过，或在本地结果提交前停止时，不会覆盖已有输出文件。如果在本地结果已经原子提交后停止，已保存的本地结果会保留，后续节点同步或 Gist 上传会取消，状态栏会明确说明。完整说明见 [GUI-使用说明.md](GUI-使用说明.md)。
 
 测速和出口地区查询期间，会锁定所有会改变任务行为的设置；“停止”会取消当前解析器、测速器、地区查询、后处理和正在等待的 Gist 请求。窗口关闭也会先等待任务停止并清理临时文件。地区查询按整批事务处理：只有协议完整且进程正常退出才应用结果；取消、半截输出或协议错误会恢复查询前的地区信息。节点事件按批次刷新列表，大批量节点不会再为每一行重复执行全表筛选和统计。
@@ -39,6 +45,8 @@ GUI 只需要以下三个文件放在同一目录：
 
 节点名称修改和删除只作用于本地筛选结果，不会回写原订阅；启用 Gist 时会在本地保存成功后自动同步 Gist。服务器、端口或凭据不开放编辑，因为连接参数变化后旧测速结果会立即失效。旧版设置中的 `NodeNotes` 会在启动时自动永久清除。
 
+GUI 创建的是秘密（不公开列出）Gist，并不具备严格访问控制：任何拿到链接的人都可能读取其中的节点配置。`%APPDATA%\ClashSpeedTestGUI\settings.json` 也会明文保存用户选择保留的订阅/节点输入、输出路径、测速参数、GitHub 用户名和 Token；不要分享 Gist 链接、设置文件或输出 YAML。
+
 合并多个输入源时，同名但配置不同的节点不会被丢弃：第一个保留原名，后续节点自动使用 `原名 [2]`、`原名 [3]`。输出文件不得与任何本地输入配置或三个 GUI 运行程序相同，避免误覆盖原始配置或程序文件。
 
 出口地区是 IP 数据库的近似定位，默认不查询。点击“查询有效节点出口地区”后，程序只查询本轮已导出的有效节点，并确保请求通过各自节点代理访问；依次回退 IPWHOIS.io、FreeIPAPI 和 IP.SB，不会同时向三家发送请求。结果只保存在当前界面内，不包含或保存出口 IP、ASN、运营商，不写入 YAML，重新测速后清空。
@@ -48,7 +56,7 @@ GUI 只需要以下三个文件放在同一目录：
 - `subscription-parser.exe` 和 `speedtest-runner.exe` 均使用 Mihomo `v1.19.27`。
 - 测速层基于 `clash-speedtest v1.8.8` 做本地适配，源码位于 `tools/speedtest-runner/internal/upstream/`。
 - 节点只按完整配置指纹去重，不按 `server:port` 合并，避免误删同入口但凭据或传输参数不同的节点。
-- GUI 严格校验测速事件协议 v3 的版本、表头、节点数量、稳定 ID、固定字段和结果完整性；有效状态及排序/筛选使用内核提供的原始纳秒、字节每秒和丢包率指标，不再从格式化文字反推。协议不匹配或半截输出不会提交结果文件。
+- GUI 严格校验测速事件协议 v4 的版本、表头、节点数量、稳定 ID、固定字段和结果完整性；`tested` 表示对应传输已经启动，`complete` 表示计划传输全部完成。有效状态及排序/筛选使用内核提供的原始纳秒、字节每秒、HTTP 探测失败率和完成状态，不再从格式化文字反推。协议不匹配或半截输出不会提交结果文件。
 - 出口地区事件使用独立协议 v2；GUI 和查询器共同校验声明数量、稳定 ID、字段类型、成功/失败语义以及最终完整性。重复、未知、缺失或畸形事件会终止本批查询，已验证但尚未提交的结果也不会形成半更新。
 
 升级 Mihomo 后必须同时重新构建解析器和测速器，不要单独替换其中一个 EXE：
@@ -57,10 +65,16 @@ GUI 只需要以下三个文件放在同一目录：
 .\build-gui.ps1
 ```
 
-发布前执行完整回归；脚本会运行 GUI 自测、两个 Go 模块的无缓存测试和 `go vet`：
+发布前执行完整回归。脚本默认先从当前源码重建三个 EXE，再运行 GUI 自测、UI 夹具契约、两个 Go 模块的无缓存测试和 `go vet`，避免旧 EXE 造成假绿：
 
 ```powershell
 .\test-all.ps1
+```
+
+只想复核当前目录里已有的 EXE 时，才使用：
+
+```powershell
+.\test-all.ps1 -SkipBuild
 ```
 
 默认回归不会操作桌面。需要同时验证真实 WinForms 点击、测速、重命名、删除和最终截图时，执行：
@@ -70,6 +84,18 @@ GUI 只需要以下三个文件放在同一目录：
 ```
 
 操作级回归会打开一个隔离的测试 GUI；运行期间不要手动操作该窗口。首次执行会下载固定版本且校验 SHA-256 的 FlaUI 依赖到 `%LOCALAPPDATA%\ClashSpeedTestGUI\test-tools\FlaUI\5.0.0\`，不会安装系统组件，也不会注册快捷键或调用 PixPin。成功截图保存到 `tests\ui\artifacts\last-success.png`。
+
+自动化不读取真实订阅、节点凭据或 Token，也不使用公开测速网址。网络算法测试使用 `127.0.0.1` 随机端口上的临时 HTTP/代理服务；WinForms 测试使用 `%TEMP%` 下的本地 YAML 和固定进程夹具，不会访问 DNS、地区服务或 Gist。
+
+## v1.1.0 发布与校验
+
+`v1.1.0` 同时包含阻断级功能修复和两阶段测速调度；原计划的 `v1.0.1` 修复阶段不单独产出。Windows EXE 当前没有代码签名，首次运行可能出现 SmartScreen 提示，这不等同于哈希校验失败。
+
+发布者必须从干净源码构建并为三个 EXE 生成新的 SHA-256；每次重建后哈希都会变化，不能沿用旧版本。用户应把下载文件的 `Get-FileHash -Algorithm SHA256` 结果与同一 Release 公布的校验值逐个比对：
+
+```powershell
+Get-FileHash .\Clash-SpeedTest-GUI.exe, .\subscription-parser.exe, .\speedtest-runner.exe -Algorithm SHA256
+```
 
 ## 本地敏感配置
 
@@ -125,53 +151,8 @@ rules:
 
 # 查看帮助
 > clash-speedtest -h
-Usage of clash-speedtest:
-  -c string
-        configuration file path, also support http(s) url
-  -ua string
-        User-Agent for fetching config from http(s) URL (default: mihomo kernel UA, e.g. mihomo/1.10.0)
-  -f string
-        filter proxies by name, use regexp (default ".*")
-  -b string
-        block proxies by keywords, use | to separate multiple keywords (example: -b 'rate|x1|1x')
-  -server-url string
-        server url or direct download url (default "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg")
-  -speed-mode string
-        speed test mode: fast, download, full (default "download")
-  -download-size int
-        download size for testing proxies (default 50MB)
-  -upload-size int
-        upload size for testing proxies (full mode only) (default 20MB)
-  -timeout duration
-        timeout for testing proxies (default 5s)
-  -concurrent int
-        download concurrent size (default 4)
-  -output string
-        output config file path (default "")
-  -max-latency duration
-        filter latency greater than this value (default 800ms)
-  -max-packet-loss float
-        filter packet loss greater than this value(unit: %) (default 100)
-  -min-download-speed float
-        filter speed less than this value(unit: MB/s) (default 5)
-  -min-upload-speed float
-        filter upload speed less than this value(unit: MB/s, full mode only) (default 2)
-  -rename
-        rename nodes with IP location and speed
-  -fast
-        fast mode (alias for --speed-mode fast)
-  -gist-token string
-        GitHub personal access token for gist upload
-  -gist-address string
-        gist URL or ID for uploading output file (filename uses output basename)
-  -repo-token string
-        GitHub personal access token for repository file upload
-  -repo-address string
-        repository URL or owner/repo for uploading output file
-  -repo-file-path string
-        repository file path for uploading output file (default: output basename)
-  -repo-branch string
-        repository branch for uploading output file (default: repository default branch)
+
+# 参数和默认值以当前二进制输出为准，不在 README 复制一份容易过期的帮助表。
 
 # 演示：
 
@@ -273,7 +254,7 @@ Premium|广港|IEPL|05                        	3.87MB/s    	249.00ms
 
 ## 测速原理
 
-通过 HTTP GET 请求下载指定大小的文件，默认使用 https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg 进行测试，计算下载时间得到下载速度。因为 speed.cloudflare.com 容易返回 403，所以默认不再使用它作为测速入口。
+GUI 使用 HTTP GET 完成探测和吞吐测试。默认直链仍是 Google Chrome 下载文件；也可使用实现 `/__down` 与 `/__up` 的无路径测速服务。
 
 当 server-url 不带 path 时 (使用 https://speed.cloudflare.com 或自建测速服务)，使用 /__down 和 /__up 完成下载与上传测试。
 当 server-url 带 path 时，会被识别为直接下载地址，只进行下载测速。
@@ -296,7 +277,7 @@ clash-speedtest --server-url "https://speed.cloudflare.com" --speed-mode full
 
 测试结果：
 1. 带宽 是指下载指定大小文件的速度，即一般理解中的下载速度。当这个数值越高时表明节点的出口带宽越大。
-2. 延迟 是指 HTTP GET 请求拿到第一个字节的的响应时间，即一般理解中的 TTFB。当这个数值越低时表明你本地到达节点的延迟越低，可能意味着中转节点有 BGP 部署、出海线路是 IEPL、IPLC 等。
+2. 延迟是 5 次正式一字节 HTTP GET 探测中成功样本的中位耗时，包含经节点代理完成请求的应用层开销；它不是 ICMP Ping，也不是一次大文件下载的首字节时间。数值越低通常表示交互响应越快。
 
 请注意带宽跟延迟是两个独立的指标，两者并不关联：
 1. 可能带宽很高但是延迟也很高，这种情况下你下载速度很快但是打开网页的时候却很慢，可能是是中转节点没有 BGP 加速，但出海线路带宽很充足。

@@ -1,5 +1,6 @@
 param(
-    [switch] $IncludeWinFormsUI
+    [switch] $IncludeWinFormsUI,
+    [switch] $SkipBuild
 )
 
 $ErrorActionPreference = 'Stop'
@@ -17,6 +18,12 @@ function Invoke-Step {
     Write-Output "==> $Name"
     & $Action
     Write-Output "OK: $Name"
+}
+
+if (-not $SkipBuild) {
+    Invoke-Step "Build current source" {
+        & (Join-Path $root 'build-gui.ps1')
+    }
 }
 
 Invoke-Step "GUI self-test" {

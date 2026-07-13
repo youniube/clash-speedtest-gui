@@ -3,9 +3,11 @@ module clash-speedtest.local/speedtest-runner
 go 1.24.0
 
 require (
+	github.com/dlclark/regexp2 v1.12.0
 	github.com/faceair/clash-speedtest v1.8.8
 	github.com/metacubex/mihomo v1.19.27
 	golang.org/x/term v0.39.0
+	golang.org/x/text v0.33.0
 	gopkg.in/yaml.v2 v2.4.0
 )
 
@@ -18,7 +20,6 @@ require (
 	github.com/bahlo/generic-list-go v0.2.0 // indirect
 	github.com/coder/websocket v1.8.12 // indirect
 	github.com/coreos/go-iptables v0.8.0 // indirect
-	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/dunglas/httpsfv v1.0.2 // indirect
 	github.com/enfein/mieru/v3 v3.33.0 // indirect
 	github.com/ericlagergren/aegis v0.0.0-20250325060835-cd0defd64358 // indirect
@@ -119,7 +120,6 @@ require (
 	golang.org/x/oauth2 v0.24.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
-	golang.org/x/text v0.33.0 // indirect
 	golang.org/x/time v0.14.0 // indirect
 	golang.org/x/tools v0.41.0 // indirect
 	google.golang.org/protobuf v1.36.11 // indirect

@@ -23,12 +23,12 @@ func TestNewTSVWriter(t *testing.T) {
 		{
 			name:           "download-only mode header",
 			mode:           speedtester.SpeedModeDownload,
-			expectedHeader: "序号\t节点名称\t类型\t延迟\t抖动\t丢包率\t下载速度\n",
+			expectedHeader: "序号\t节点名称\t类型\t延迟\t抖动\tHTTP 探测失败率\t下载速度\n",
 		},
 		{
 			name:           "upload-enabled mode header",
 			mode:           speedtester.SpeedModeFull,
-			expectedHeader: "序号\t节点名称\t类型\t延迟\t抖动\t丢包率\t下载速度\t上传速度\n",
+			expectedHeader: "序号\t节点名称\t类型\t延迟\t抖动\tHTTP 探测失败率\t下载速度\t上传速度\n",
 		},
 	}
 

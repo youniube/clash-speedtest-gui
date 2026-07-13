@@ -23,7 +23,7 @@ func TestGetHeaders(t *testing.T) {
 
 	t.Run("download-only mode", func(t *testing.T) {
 		headers := GetHeaders(speedtester.SpeedModeDownload)
-		expected := []string{"序号", "节点名称", "类型", "延迟", "抖动", "丢包率", "下载速度"}
+		expected := []string{"序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度"}
 		if len(headers) != len(expected) {
 			t.Errorf("expected %d headers, got %d", len(expected), len(headers))
 		}
@@ -36,7 +36,7 @@ func TestGetHeaders(t *testing.T) {
 
 	t.Run("upload-enabled mode", func(t *testing.T) {
 		headers := GetHeaders(speedtester.SpeedModeFull)
-		expected := []string{"序号", "节点名称", "类型", "延迟", "抖动", "丢包率", "下载速度", "上传速度"}
+		expected := []string{"序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度", "上传速度"}
 		if len(headers) != len(expected) {
 			t.Errorf("expected %d headers, got %d", len(expected), len(headers))
 		}
@@ -99,7 +99,7 @@ func TestFormatRow(t *testing.T) {
 			t.Errorf("expected jitter '100ms', got %q", row[4])
 		}
 		if row[5] != "5.0%" {
-			t.Errorf("expected packet loss '5.0%%', got %q", row[5])
+			t.Errorf("expected HTTP probe failure rate '5.0%%', got %q", row[5])
 		}
 		if row[6] != "10.00MB/s" {
 			t.Errorf("expected download speed '10.00MB/s', got %q", row[6])
@@ -127,7 +127,7 @@ func TestFormatRow(t *testing.T) {
 			t.Errorf("expected jitter '100ms', got %q", row[4])
 		}
 		if row[5] != "5.0%" {
-			t.Errorf("expected packet loss '5.0%%', got %q", row[5])
+			t.Errorf("expected HTTP probe failure rate '5.0%%', got %q", row[5])
 		}
 		if row[6] != "10.00MB/s" {
 			t.Errorf("expected download speed '10.00MB/s', got %q", row[6])
