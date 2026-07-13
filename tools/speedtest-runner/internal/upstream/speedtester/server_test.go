@@ -68,32 +68,3 @@ func TestResolveServerTarget(t *testing.T) {
 		}
 	})
 }
-
-func TestNewRejectsFullModeForDirectURL(t *testing.T) {
-	_, err := New(&Config{
-		ServerURL:    "https://example.com/file.bin",
-		UploadSize:   10,
-		DownloadSize: 10,
-		Concurrent:   1,
-		Mode:         SpeedModeFull,
-	})
-	if err == nil || !strings.Contains(err.Error(), "does not support upload") {
-		t.Fatalf("expected a clear direct-download/full-mode error, got %v", err)
-	}
-}
-
-func TestNewEnablesUploadForDownloadServer(t *testing.T) {
-	st, err := New(&Config{
-		ServerURL:    "https://example.com",
-		UploadSize:   10,
-		DownloadSize: 10,
-		Concurrent:   1,
-		Mode:         SpeedModeFull,
-	})
-	if err != nil {
-		t.Fatalf("New failed: %v", err)
-	}
-	if st.Mode() != SpeedModeFull {
-		t.Fatalf("expected mode to remain %s for download server url, got %s", SpeedModeFull, st.Mode())
-	}
-}

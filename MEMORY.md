@@ -107,3 +107,7 @@
 - 2026-07-13 发布修复目标合并为 `v1.1.0`：已解决无路径测速服务、订阅 32MiB 静默截断、逗号输入、首次默认值、动态协议筛选、结构化重命名和 provider 双拉取/错配；`test-all.ps1` 默认从当前源码重建后再回归。最终无缓存 Go 测试、`go vet`、严格协议夹具和真实 WinForms 操作回归均通过，操作截图由 `PrintWindow(PW_RENDERFULLCONTENT)` 成功捕获。
 - 2026-07-13 `v1.1.0` 修复已推送到私有仓库分支 `agent/v1.1.0-speedtest-reliability`，草稿 PR 位于 `github.com/youniube/clash-speedtest-gui/pull/1`；合并到 `main` 后再创建正式标签与 Windows x86_64 Release，避免标签指向未审阅分支。
 - 2026-07-13 PR #1 已 squash 合并到 `main` 提交 `009a5ca`，正式 `v1.1.0` Release 位于 `github.com/youniube/clash-speedtest-gui/releases/tag/v1.1.0`；发布包从该提交重建并通过完整 WinForms/Go 回归，远端下载后 SHA-256 复核为 `b945066062bdb4916a929f2c20abc0b8ae9eb3cd48d52a6ff1f72159e7dbac79`。
+- 2026-07-13 本地源码的测速协议升级为严格 v5，取代此前 v4 方案：每个稳定节点 ID 必须先且只能出现一次 `probe_completed`，下载候选随后出现一次 `download_started`，最终结果按节点立即 Flush；GUI 因此能实时区分等待探测、等待下载、下载中和最终状态，快速模式不再等待整批探测。节点间下载保持串行，单节点内部保留多连接。
+- 2026-07-13 测速功能统一为纯下载：GUI 固定七列并明确使用“HTTP 延迟”“HTTP 探测失败率”，执行器只接受 `fast`/`download`，探测超时与下载超时独立。深度方案改为 50MB、4 条下载连接和更严格阈值；旧 `full` 自动迁移为 `download`，旧上传字段读取后清除，旧 `TimeoutSeconds` 继续代表下载超时。下载速度只代表“当前电脑网络 → 代理节点 → 当前测速服务器”的本次路径吞吐。
+- 2026-07-13 自动重命名不再读取入口 `server`：测速临时结果中的有效节点通过各自 Mihomo 代理执行现有地区查询，成功后按 `🇯🇵 日本 JP-01` 生成稳定 ID 重命名；单节点失败保留原名，整批协议异常不应用任何重命名，取消发生在本地原子提交前时保留旧输出，提交成功后才允许同步 Gist。地区事件仍不包含出口 IP、ASN 或运营商。
+- 2026-07-13 本轮最终验收：从当前源码重建三个 EXE，GUI 自测、严格 UI 夹具、300 个模拟不可达节点、探测并发与下载串行、纯 GET/Range/部分传输算法、两个 Go 模块无缓存测试、`go vet` 和真实 FlaUI WinForms 操作回归全部通过；未提交、推送或发布版本。

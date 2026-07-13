@@ -122,45 +122,38 @@ func TestSanitizeLegacyTSVCellsKeepsOnePhysicalRow(t *testing.T) {
 	}
 }
 
-func TestBuildResultEventV4PreservesRawMetrics(t *testing.T) {
+func TestBuildResultEventV5PreservesDownloadMetrics(t *testing.T) {
 	result := &speedtester.Result{
-		Latency:          1500 * time.Microsecond,
-		Jitter:           250 * time.Microsecond,
-		PacketLoss:       12.34,
-		DownloadSpeed:    3.5 * 1024 * 1024,
-		UploadSpeed:      1.25 * 1024 * 1024,
-		DownloadTested:   true,
-		UploadTested:     true,
-		DownloadComplete: true,
-		UploadComplete:   true,
+		Latency:                 1500 * time.Microsecond,
+		Jitter:                  250 * time.Microsecond,
+		HTTPProbeFailurePercent: 12.34,
+		DownloadSpeed:           3.5 * 1024 * 1024,
+		DownloadTested:          true,
+		DownloadComplete:        true,
 	}
-	row := []string{"1.", "node-a", "ss", "1ms", "0ms", "12.3%", "3.50MB/s", "1.25MB/s"}
-	event := buildResultEvent("stable-id", row, result, speedtester.SpeedModeFull, true)
-	if speedEventProtocolVersion != 4 {
-		t.Fatalf("speed event protocol version=%d, want 4", speedEventProtocolVersion)
+	row := []string{"1.", "node-a", "ss", "1ms", "0ms", "12.3%", "3.50MB/s"}
+	event := buildResultEvent("stable-id", row, result, speedtester.SpeedModeDownload, true)
+	if speedEventProtocolVersion != 5 {
+		t.Fatalf("speed event protocol version=%d, want 5", speedEventProtocolVersion)
 	}
 	if event.ID != "stable-id" || !event.Usable || event.Metrics.LatencyNanoseconds != int64(result.Latency) ||
-		event.Metrics.JitterNanoseconds != int64(result.Jitter) || event.Metrics.PacketLossPercent != 12.34 ||
+		event.Metrics.JitterNanoseconds != int64(result.Jitter) || event.Metrics.HTTPProbeFailurePercent != 12.34 ||
 		event.Metrics.DownloadBytesPerSecond != result.DownloadSpeed ||
-		event.Metrics.UploadBytesPerSecond != result.UploadSpeed ||
-		!event.Metrics.DownloadTested || !event.Metrics.UploadTested ||
-		!event.Metrics.DownloadComplete || !event.Metrics.UploadComplete {
-		t.Fatalf("unexpected v4 result event: %#v", event)
+		!event.Metrics.DownloadTested || !event.Metrics.DownloadComplete {
+		t.Fatalf("unexpected v5 result event: %#v", event)
 	}
 
-	download := buildResultEvent("download", row[:7], result, speedtester.SpeedModeDownload, false)
-	if !download.Metrics.DownloadTested || download.Metrics.UploadTested ||
-		download.Metrics.UploadBytesPerSecond != 0 || download.Usable {
+	download := buildResultEvent("download", row, result, speedtester.SpeedModeDownload, false)
+	if !download.Metrics.DownloadTested || download.Usable {
 		t.Fatalf("download mode flags are wrong: %#v", download.Metrics)
 	}
 	fast := buildResultEvent("fast", row[:4], result, speedtester.SpeedModeFast, false)
-	if fast.Metrics.DownloadTested || fast.Metrics.UploadTested ||
-		fast.Metrics.DownloadBytesPerSecond != 0 || fast.Metrics.UploadBytesPerSecond != 0 {
+	if fast.Metrics.DownloadTested || fast.Metrics.DownloadBytesPerSecond != 0 {
 		t.Fatalf("fast mode must not report transfer tests: %#v", fast.Metrics)
 	}
 	skipped := buildResultEvent("skipped", row, &speedtester.Result{Latency: time.Second},
-		speedtester.SpeedModeFull, false)
-	if skipped.Metrics.DownloadTested || skipped.Metrics.UploadTested {
+		speedtester.SpeedModeDownload, false)
+	if skipped.Metrics.DownloadTested {
 		t.Fatalf("early exit must report skipped transfers: %#v", skipped.Metrics)
 	}
 	failed := buildResultEvent("failed", row[:7], &speedtester.Result{
@@ -176,17 +169,16 @@ func TestBuildResultEventV4PreservesRawMetrics(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, field := range []string{
-		`"usable"`, `"metrics"`, `"latency_nanoseconds"`, `"packet_loss_percent"`,
-		`"download_bytes_per_second"`, `"download_tested"`, `"upload_tested"`,
-		`"download_complete"`, `"upload_complete"`,
+		`"usable"`, `"metrics"`, `"latency_nanoseconds"`, `"http_probe_failure_percent"`,
+		`"download_bytes_per_second"`, `"download_tested"`, `"download_complete"`,
 	} {
 		if !bytes.Contains(body, []byte(field)) {
-			t.Fatalf("v4 JSON is missing %s: %s", field, body)
+			t.Fatalf("v5 JSON is missing %s: %s", field, body)
 		}
 	}
 }
 
-func TestResultEventV4UsesRawThresholdDecision(t *testing.T) {
+func TestResultEventV5UsesRawThresholdDecision(t *testing.T) {
 	previousLatency := *maxLatency
 	previousDownloadSize := *downloadSize
 	previousMinDownload := *minDownloadSpeed
@@ -198,8 +190,8 @@ func TestResultEventV4UsesRawThresholdDecision(t *testing.T) {
 
 	*maxLatency = time.Second
 	latencyBoundary := &speedtester.Result{
-		Latency:    time.Second + 900*time.Microsecond,
-		PacketLoss: 0,
+		Latency:                 time.Second + 900*time.Microsecond,
+		HTTPProbeFailurePercent: 0,
 	}
 	latencyRow := output.FormatRow(latencyBoundary, speedtester.SpeedModeFast, 0)
 	latencyEvent := buildResultEvent("latency", latencyRow, latencyBoundary,
@@ -212,12 +204,12 @@ func TestResultEventV4UsesRawThresholdDecision(t *testing.T) {
 	*downloadSize = 20 * 1024 * 1024
 	*minDownloadSpeed = 5
 	downloadBoundary := &speedtester.Result{
-		Latency:          20 * time.Millisecond,
-		PacketLoss:       0,
-		DownloadSpeed:    5*1024*1024 - 1,
-		DownloadTime:     time.Second,
-		DownloadTested:   true,
-		DownloadComplete: true,
+		Latency:                 20 * time.Millisecond,
+		HTTPProbeFailurePercent: 0,
+		DownloadSpeed:           5*1024*1024 - 1,
+		DownloadTime:            time.Second,
+		DownloadTested:          true,
+		DownloadComplete:        true,
 	}
 	downloadRow := output.FormatRow(downloadBoundary, speedtester.SpeedModeDownload, 0)
 	downloadEvent := buildResultEvent("download", downloadRow, downloadBoundary,
@@ -233,7 +225,7 @@ func TestFastModeRejectsUnreachableNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &speedtester.Result{Latency: 0, PacketLoss: 100}
+	result := &speedtester.Result{Latency: 0, HTTPProbeFailurePercent: 100}
 	if isUsable(result, mode) {
 		t.Fatal("unreachable node must not be exported")
 	}
@@ -244,7 +236,7 @@ func TestFastModeKeepsReachableNode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &speedtester.Result{Latency: 100 * time.Millisecond, PacketLoss: 0}
+	result := &speedtester.Result{Latency: 100 * time.Millisecond, HTTPProbeFailurePercent: 0}
 	if !isUsable(result, mode) {
 		t.Fatal("reachable node should be exported")
 	}
@@ -277,8 +269,9 @@ func TestTwoStageRunnerSerializesNodeTransfers(t *testing.T) {
 
 	tester, err := speedtester.New(&speedtester.Config{
 		ServerURL: server.URL, Mode: speedtester.SpeedModeDownload,
-		DownloadSize: 8 * 1024, Timeout: 2 * time.Second, Concurrent: 2,
-		OutputPath: "result.yaml", MaxPacketLoss: 100,
+		DownloadSize: 8 * 1024, ProbeTimeout: 2 * time.Second,
+		DownloadTimeout: 2 * time.Second, Concurrent: 2,
+		OutputPath: "result.yaml", MaxHTTPProbeFailure: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,6 +308,10 @@ func TestTwoStageRunnerSerializesNodeTransfers(t *testing.T) {
 	if maxActiveTransfers.Load() > 2 {
 		t.Fatalf("node transfers overlapped: max active requests=%d, per-node limit=2", maxActiveTransfers.Load())
 	}
+	transcript := output.String()
+	if strings.Count(transcript, "@progressjson\t") != 4 || strings.Count(transcript, "@resultjson\t") != 2 {
+		t.Fatalf("unexpected staged event counts: %s", transcript)
+	}
 	for _, result := range results {
 		if !result.DownloadComplete || result.DownloadSpeed <= 0 {
 			t.Fatalf("incomplete staged transfer: %#v", result)
@@ -322,33 +319,131 @@ func TestTwoStageRunnerSerializesNodeTransfers(t *testing.T) {
 	}
 }
 
+func TestProbeConcurrencyAndFastResultsStreamImmediately(t *testing.T) {
+	var activeProbes atomic.Int32
+	var maxActiveProbes atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		active := activeProbes.Add(1)
+		for {
+			previous := maxActiveProbes.Load()
+			if active <= previous || maxActiveProbes.CompareAndSwap(previous, active) {
+				break
+			}
+		}
+		defer activeProbes.Add(-1)
+		time.Sleep(15 * time.Millisecond)
+		_, _ = w.Write([]byte{0})
+	}))
+	defer server.Close()
+
+	tester, err := speedtester.New(&speedtester.Config{
+		ServerURL: server.URL, Mode: speedtester.SpeedModeFast,
+		ProbeTimeout: time.Second, Concurrent: 1, MaxHTTPProbeFailure: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies := make(map[string]*speedtester.CProxy)
+	ids := make(map[string]string)
+	for index := 0; index < 8; index++ {
+		name := fmt.Sprintf("node-%02d", index)
+		proxies[name] = &speedtester.CProxy{
+			Proxy:  adapter.NewProxy(outbound.NewDirect()),
+			Config: map[string]any{"name": name, "type": "direct", "server": name},
+		}
+		ids[name] = fmt.Sprintf("%064x", index+1)
+	}
+
+	var transcript bytes.Buffer
+	results, err := testInStages(tester, proxies, ids, speedtester.SpeedModeFast,
+		bufio.NewWriter(&transcript), 3)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(proxies) {
+		t.Fatalf("result count=%d, want %d", len(results), len(proxies))
+	}
+	if maximum := maxActiveProbes.Load(); maximum < 2 || maximum > 3 {
+		t.Fatalf("probe concurrency=%d, want between 2 and 3", maximum)
+	}
+	text := transcript.String()
+	if strings.Index(text, "@resultjson\t") > strings.LastIndex(text, "@progressjson\t") {
+		t.Fatal("fast results were held until every probe completed")
+	}
+}
+
+func TestManyUnreachableNodesFinishWithoutWaitingState(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unreachable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	tester, err := speedtester.New(&speedtester.Config{
+		ServerURL: server.URL, Mode: speedtester.SpeedModeFast,
+		ProbeTimeout: time.Second, Concurrent: 1, MaxHTTPProbeFailure: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const nodeCount = 300
+	proxies := make(map[string]*speedtester.CProxy, nodeCount)
+	ids := make(map[string]string, nodeCount)
+	for index := 0; index < nodeCount; index++ {
+		name := fmt.Sprintf("failed-%03d", index)
+		proxies[name] = &speedtester.CProxy{
+			Proxy:  adapter.NewProxy(outbound.NewDirect()),
+			Config: map[string]any{"name": name, "type": "direct", "server": name},
+		}
+		ids[name] = fmt.Sprintf("%064x", index+1)
+	}
+
+	var transcript bytes.Buffer
+	results, err := testInStages(tester, proxies, ids, speedtester.SpeedModeFast,
+		bufio.NewWriter(&transcript), 128)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != nodeCount {
+		t.Fatalf("result count=%d, want %d", len(results), nodeCount)
+	}
+	text := transcript.String()
+	if strings.Count(text, "@progressjson\t") != nodeCount ||
+		strings.Count(text, "@resultjson\t") != nodeCount {
+		t.Fatal("every unreachable node must receive probe progress and a final result")
+	}
+	for _, result := range results {
+		if result.Latency != 0 || result.HTTPProbeFailurePercent != 100 {
+			t.Fatalf("unreachable node was not finalized as failed: %#v", result)
+		}
+	}
+}
+
 func TestValidateSpeedOptionsRejectsUnsafeValues(t *testing.T) {
+	previousProbeTimeout := *probeTimeout
 	previousTimeout := *timeout
 	previousNodeParallel := *nodeParallel
 	previousTransferParallel := *transferParallel
 	previousDownloadSize := *downloadSize
-	previousUploadSize := *uploadSize
-	previousPacketLoss := *maxPacketLoss
+	previousProbeFailure := *maxProbeFailure
 	defer func() {
+		*probeTimeout = previousProbeTimeout
 		*timeout = previousTimeout
 		*nodeParallel = previousNodeParallel
 		*transferParallel = previousTransferParallel
 		*downloadSize = previousDownloadSize
-		*uploadSize = previousUploadSize
-		*maxPacketLoss = previousPacketLoss
+		*maxProbeFailure = previousProbeFailure
 	}()
 
+	*probeTimeout = time.Second
 	*timeout = time.Second
 	*nodeParallel = 4
 	*transferParallel = 4
 	*downloadSize = 1024
-	*uploadSize = 1024
-	*maxPacketLoss = 100
-	if err := validateSpeedOptions(speedtester.SpeedModeFull); err != nil {
+	*maxProbeFailure = 100
+	if err := validateSpeedOptions(speedtester.SpeedModeDownload); err != nil {
 		t.Fatalf("valid options rejected: %v", err)
 	}
 	*transferParallel = speedtester.MaxTransferConcurrency + 1
-	if err := validateSpeedOptions(speedtester.SpeedModeFull); err == nil {
+	if err := validateSpeedOptions(speedtester.SpeedModeDownload); err == nil {
 		t.Fatal("unsafe transfer concurrency must be rejected")
 	}
 	*transferParallel = 4
@@ -357,8 +452,8 @@ func TestValidateSpeedOptionsRejectsUnsafeValues(t *testing.T) {
 		t.Fatal("zero download size must be rejected in download mode")
 	}
 	*downloadSize = 1024
-	*maxPacketLoss = 101
-	if err := validateSpeedOptions(speedtester.SpeedModeFull); err == nil {
+	*maxProbeFailure = 101
+	if err := validateSpeedOptions(speedtester.SpeedModeDownload); err == nil {
 		t.Fatal("failure rate over 100 must be rejected")
 	}
 }

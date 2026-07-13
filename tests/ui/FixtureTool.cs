@@ -16,7 +16,7 @@ namespace ClashSpeedTestGUI.UiFixtures
     {
         private const string FixtureRootEnvironment =
             "CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT";
-        private const int SpeedProtocolVersion = 4;
+        private const int SpeedProtocolVersion = 5;
         private const int RegionProtocolVersion = 2;
 
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
@@ -244,7 +244,7 @@ namespace ClashSpeedTestGUI.UiFixtures
             string outputPath = RequireSandboxPath(arguments.Require("-output"), "测速输出");
             string speedMode = (arguments.Get("-speed-mode", "download") ?? "")
                 .Trim().ToLowerInvariant();
-            if (speedMode != "fast" && speedMode != "download" && speedMode != "full")
+            if (speedMode != "fast" && speedMode != "download")
                 throw new InvalidOperationException("不支持的测速模式：" + speedMode);
 
             string scenario = ReadScenario("speed-mode.txt", "success",
@@ -264,9 +264,30 @@ namespace ClashSpeedTestGUI.UiFixtures
             else if (scenario == "block-after-manifest")
                 BlockForever();
 
-            WriteEvent(output, "@resultjson", BuildSpeedResult(NodeA, 1, speedMode, true));
-            WriteEvent(output, "@resultjson", BuildSpeedResult(NodeB, 2, speedMode, true));
-            WriteEvent(output, "@resultjson", BuildSpeedResult(NodeC, 3, speedMode, false));
+            if (speedMode == "fast")
+            {
+                WriteSpeedProgress(output, NodeA, "probe_completed");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeA, 1, speedMode, true));
+                output.Flush();
+                WriteSpeedProgress(output, NodeB, "probe_completed");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeB, 2, speedMode, true));
+                output.Flush();
+                WriteSpeedProgress(output, NodeC, "probe_completed");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeC, 3, speedMode, false));
+            }
+            else
+            {
+                WriteSpeedProgress(output, NodeA, "probe_completed");
+                WriteSpeedProgress(output, NodeB, "probe_completed");
+                WriteSpeedProgress(output, NodeC, "probe_completed");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeC, 3, speedMode, false));
+                output.Flush();
+                WriteSpeedProgress(output, NodeA, "download_started");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeA, 1, speedMode, true));
+                output.Flush();
+                WriteSpeedProgress(output, NodeB, "download_started");
+                WriteEvent(output, "@resultjson", BuildSpeedResult(NodeB, 2, speedMode, true));
+            }
             output.Flush();
 
             EnsureParentDirectory(outputPath);
@@ -439,15 +460,11 @@ namespace ClashSpeedTestGUI.UiFixtures
         {
             long latency = node == NodeA ? 42000000L : node == NodeB ? 420000000L : 0L;
             long jitter = node == NodeA ? 2000000L : node == NodeB ? 12000000L : 0L;
-            double packetLoss = node == NodeA ? 0D : node == NodeB ? 1.5D : 100D;
+            double probeFailure = node == NodeA ? 0D : node == NodeB ? 1.5D : 100D;
             bool downloadTested = usable && mode != "fast";
-            bool uploadTested = usable && mode == "full";
             bool downloadComplete = downloadTested;
-            bool uploadComplete = uploadTested;
             double downloadBytes = !downloadTested ? 0D
                 : node == NodeA ? 8D * 1024D * 1024D : 12D * 1024D * 1024D;
-            double uploadBytes = !uploadTested ? 0D
-                : node == NodeA ? 3D * 1024D * 1024D : 4D * 1024D * 1024D;
 
             List<string> cells = new List<string>();
             cells.Add(ordinal.ToString(CultureInfo.InvariantCulture) + ".");
@@ -462,31 +479,20 @@ namespace ClashSpeedTestGUI.UiFixtures
                     ? (jitter / 1000000L).ToString(CultureInfo.InvariantCulture) + "ms"
                     : "未测试");
                 cells.Add(usable
-                    ? packetLoss.ToString("0.##", CultureInfo.InvariantCulture) + "%"
+                    ? probeFailure.ToString("0.##", CultureInfo.InvariantCulture) + "%"
                     : "100%");
                 cells.Add(downloadTested
                     ? (downloadBytes / 1024D / 1024D).ToString("0.00", CultureInfo.InvariantCulture)
                         + " MB/s"
                     : "未测试");
             }
-            if (mode == "full")
-            {
-                cells.Add(uploadTested
-                    ? (uploadBytes / 1024D / 1024D).ToString("0.00", CultureInfo.InvariantCulture)
-                        + " MB/s"
-                    : "未测试");
-            }
-
             object metrics = Dictionary(
                 "latency_nanoseconds", latency,
                 "jitter_nanoseconds", jitter,
-                "packet_loss_percent", packetLoss,
+                "http_probe_failure_percent", probeFailure,
                 "download_bytes_per_second", downloadBytes,
-                "upload_bytes_per_second", uploadBytes,
                 "download_tested", downloadTested,
-                "upload_tested", uploadTested,
-                "download_complete", downloadComplete,
-                "upload_complete", uploadComplete);
+                "download_complete", downloadComplete);
             return Dictionary(
                 "id", node.Id,
                 "cells", cells.ToArray(),
@@ -497,19 +503,16 @@ namespace ClashSpeedTestGUI.UiFixtures
         private static string[] SpeedHeaders(string mode)
         {
             if (mode == "fast")
-                return new[] { "序号", "节点名称", "类型", "延迟" };
-            if (mode == "full")
-            {
-                return new[]
-                {
-                    "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率",
-                    "下载速度", "上传速度"
-                };
-            }
+                return new[] { "序号", "节点名称", "类型", "HTTP 延迟" };
             return new[]
             {
-                "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度"
+                "序号", "节点名称", "类型", "HTTP 延迟", "抖动", "HTTP 探测失败率", "下载速度"
             };
+        }
+
+        private static void WriteSpeedProgress(StreamWriter output, NodeDefinition node, string stage)
+        {
+            WriteEvent(output, "@progressjson", Dictionary("id", node.Id, "stage", stage));
         }
 
         private static string[] ReadRegionRequest(string requestPath)

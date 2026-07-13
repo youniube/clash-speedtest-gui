@@ -90,12 +90,11 @@ namespace ClashSpeedTestGUI
         public string BlockKeywords { get; set; }
         public string ServerUrl { get; set; }
         public decimal DownloadSizeMb { get; set; }
-        public decimal UploadSizeMb { get; set; }
+        public decimal ProbeTimeoutSeconds { get; set; }
         public decimal TimeoutSeconds { get; set; }
         public decimal Concurrent { get; set; }
         public decimal TransferConcurrent { get; set; }
-        public decimal MaxPacketLoss { get; set; }
-        public decimal MinUploadSpeed { get; set; }
+        public decimal MaxHTTPProbeFailure { get; set; }
         public string UserAgent { get; set; }
 
         public static AppSettings CreateDefault()
@@ -117,12 +116,11 @@ namespace ClashSpeedTestGUI
                 BlockKeywords = "",
                 ServerUrl = "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg",
                 DownloadSizeMb = 20,
-                UploadSizeMb = 20,
+                ProbeTimeoutSeconds = 3,
                 TimeoutSeconds = 8,
                 Concurrent = 4,
                 TransferConcurrent = 4,
-                MaxPacketLoss = 50,
-                MinUploadSpeed = 2,
+                MaxHTTPProbeFailure = 50,
                 UserAgent = ""
             };
         }
@@ -165,15 +163,35 @@ namespace ClashSpeedTestGUI
                 string json = File.ReadAllText(SettingsPath, Encoding.UTF8);
                 Dictionary<string, object> raw = serializer.DeserializeObject(json)
                     as Dictionary<string, object>;
-                bool removeLegacyNotes = raw != null && raw.ContainsKey("NodeNotes");
+                bool rewriteLegacy = raw != null && (raw.ContainsKey("NodeNotes")
+                    || raw.ContainsKey("UploadSizeMb") || raw.ContainsKey("MinUploadSpeed")
+                    || raw.ContainsKey("MaxPacketLoss"));
                 AppSettings loaded = serializer.Deserialize<AppSettings>(json);
                 if (loaded == null)
                 {
                     return defaults;
                 }
 
+                if (raw != null && raw.ContainsKey("MaxPacketLoss"))
+                {
+                    try
+                    {
+                        loaded.MaxHTTPProbeFailure = Convert.ToDecimal(
+                            raw["MaxPacketLoss"], CultureInfo.InvariantCulture);
+                    }
+                    catch { }
+                }
+                else if (raw == null || !raw.ContainsKey("MaxHTTPProbeFailure"))
+                {
+                    loaded.MaxHTTPProbeFailure = defaults.MaxHTTPProbeFailure;
+                }
+                if (string.Equals(loaded.SpeedMode, "full", StringComparison.OrdinalIgnoreCase))
+                {
+                    loaded.SpeedMode = "download";
+                    rewriteLegacy = true;
+                }
                 Normalize(loaded, defaults);
-                if (removeLegacyNotes)
+                if (rewriteLegacy)
                 {
                     try { Save(loaded); } catch { }
                 }
@@ -220,18 +238,21 @@ namespace ClashSpeedTestGUI
                 value.GistUsername = GistClient.TryExtractUsername(value.GistAddress);
             }
             if (string.IsNullOrWhiteSpace(value.SpeedMode)) value.SpeedMode = defaults.SpeedMode;
+            if (!string.Equals(value.SpeedMode, "fast", StringComparison.OrdinalIgnoreCase)
+                && !string.Equals(value.SpeedMode, "download", StringComparison.OrdinalIgnoreCase))
+                value.SpeedMode = defaults.SpeedMode;
             if (value.BlockKeywords == null) value.BlockKeywords = defaults.BlockKeywords;
             if (string.IsNullOrWhiteSpace(value.ServerUrl)) value.ServerUrl = defaults.ServerUrl;
             if (value.UserAgent == null) value.UserAgent = defaults.UserAgent;
             if (value.MaxLatencyMs < 0) value.MaxLatencyMs = defaults.MaxLatencyMs;
             if (value.MinDownloadSpeed < 0) value.MinDownloadSpeed = defaults.MinDownloadSpeed;
             if (value.DownloadSizeMb <= 0) value.DownloadSizeMb = defaults.DownloadSizeMb;
-            if (value.UploadSizeMb <= 0) value.UploadSizeMb = defaults.UploadSizeMb;
+            if (value.ProbeTimeoutSeconds <= 0) value.ProbeTimeoutSeconds = defaults.ProbeTimeoutSeconds;
             if (value.TimeoutSeconds <= 0) value.TimeoutSeconds = defaults.TimeoutSeconds;
             if (value.Concurrent <= 0) value.Concurrent = defaults.Concurrent;
             if (value.TransferConcurrent <= 0) value.TransferConcurrent = defaults.TransferConcurrent;
-            if (value.MaxPacketLoss < 0 || value.MaxPacketLoss > 100) value.MaxPacketLoss = defaults.MaxPacketLoss;
-            if (value.MinUploadSpeed < 0) value.MinUploadSpeed = defaults.MinUploadSpeed;
+            if (value.MaxHTTPProbeFailure < 0 || value.MaxHTTPProbeFailure > 100)
+                value.MaxHTTPProbeFailure = defaults.MaxHTTPProbeFailure;
         }
     }
 
@@ -251,12 +272,11 @@ namespace ClashSpeedTestGUI
         public string BlockKeywords;
         public string ServerUrl;
         public int DownloadSizeBytes;
-        public int UploadSizeBytes;
+        public double ProbeTimeoutSeconds;
         public double TimeoutSeconds;
         public int NodeConcurrent;
         public int TransferConcurrent;
-        public double MaxPacketLoss;
-        public double MinUploadSpeed;
+        public double MaxHTTPProbeFailure;
         public string UserAgent;
     }
 
@@ -266,12 +286,11 @@ namespace ClashSpeedTestGUI
         public decimal MaxLatencyMs;
         public decimal MinDownloadSpeed;
         public decimal DownloadSizeMb;
-        public decimal UploadSizeMb;
+        public decimal ProbeTimeoutSeconds;
         public decimal TimeoutSeconds;
         public decimal NodeConcurrent;
         public decimal TransferConcurrent;
-        public decimal MaxPacketLoss;
-        public decimal MinUploadSpeed;
+        public decimal MaxHTTPProbeFailure;
         public string Hint;
     }
 
@@ -287,12 +306,11 @@ namespace ClashSpeedTestGUI
                     MaxLatencyMs = 1000,
                     MinDownloadSpeed = 0,
                     DownloadSizeMb = 20,
-                    UploadSizeMb = 20,
-                    TimeoutSeconds = 5,
+                    ProbeTimeoutSeconds = 2,
+                    TimeoutSeconds = 8,
                     NodeConcurrent = 8,
                     TransferConcurrent = 1,
-                    MaxPacketLoss = 100,
-                    MinUploadSpeed = 0,
+                    MaxHTTPProbeFailure = 100,
                     Hint = "仅测延迟和连通性，几乎不消耗测速流量。"
                 };
             }
@@ -304,12 +322,11 @@ namespace ClashSpeedTestGUI
                     MaxLatencyMs = 800,
                     MinDownloadSpeed = 3,
                     DownloadSizeMb = 20,
-                    UploadSizeMb = 20,
+                    ProbeTimeoutSeconds = 3,
                     TimeoutSeconds = 8,
                     NodeConcurrent = 4,
                     TransferConcurrent = 4,
-                    MaxPacketLoss = 50,
-                    MinUploadSpeed = 2,
+                    MaxHTTPProbeFailure = 50,
                     Hint = "测试下载速度，每个节点最多约使用 20MB 流量。"
                 };
             }
@@ -317,17 +334,16 @@ namespace ClashSpeedTestGUI
             {
                 return new SpeedPreset
                 {
-                    Mode = "full",
-                    MaxLatencyMs = 800,
-                    MinDownloadSpeed = 5,
+                    Mode = "download",
+                    MaxLatencyMs = 500,
+                    MinDownloadSpeed = 8,
                     DownloadSizeMb = 50,
-                    UploadSizeMb = 20,
+                    ProbeTimeoutSeconds = 3,
                     TimeoutSeconds = 10,
                     NodeConcurrent = 3,
                     TransferConcurrent = 4,
-                    MaxPacketLoss = 20,
-                    MinUploadSpeed = 2,
-                    Hint = "完整测试下载和上传，每个节点最多约使用 70MB 流量。"
+                    MaxHTTPProbeFailure = 10,
+                    Hint = "大流量纯下载测试，每个节点最多约使用 50MB，筛选阈值更严格。"
                 };
             }
             return null;
@@ -344,12 +360,12 @@ namespace ClashSpeedTestGUI
         public Dictionary<string, object> Config;
         public double LatencyMs;
         public double DownloadMbps;
-        public double UploadMbps;
         public bool DownloadTested;
-        public bool UploadTested;
         public bool DownloadComplete;
-        public bool UploadComplete;
+        public bool ProbeCompleted;
+        public bool DownloadStarted;
         public string State;
+        public string StatusDetail;
         public string RegionState;
         public string RegionCountryCode;
         public string RegionCountry;
@@ -433,13 +449,16 @@ namespace ClashSpeedTestGUI
     {
         public long? latency_nanoseconds { get; set; }
         public long? jitter_nanoseconds { get; set; }
-        public double? packet_loss_percent { get; set; }
+        public double? http_probe_failure_percent { get; set; }
         public double? download_bytes_per_second { get; set; }
-        public double? upload_bytes_per_second { get; set; }
         public bool? download_tested { get; set; }
-        public bool? upload_tested { get; set; }
         public bool? download_complete { get; set; }
-        public bool? upload_complete { get; set; }
+    }
+
+    internal sealed class NodeProgressEvent
+    {
+        public string id { get; set; }
+        public string stage { get; set; }
     }
 
     internal static class NodeResultProjection
@@ -450,22 +469,17 @@ namespace ClashSpeedTestGUI
                 || !result.usable.HasValue
                 || !result.metrics.latency_nanoseconds.HasValue
                 || !result.metrics.jitter_nanoseconds.HasValue
-                || !result.metrics.packet_loss_percent.HasValue
+                || !result.metrics.http_probe_failure_percent.HasValue
                 || !result.metrics.download_bytes_per_second.HasValue
-                || !result.metrics.upload_bytes_per_second.HasValue
                 || !result.metrics.download_tested.HasValue
-                || !result.metrics.upload_tested.HasValue
-                || !result.metrics.download_complete.HasValue
-                || !result.metrics.upload_complete.HasValue)
-                throw new InvalidOperationException("无法应用不完整的 v4 结果事件。");
+                || !result.metrics.download_complete.HasValue)
+                throw new InvalidOperationException("无法应用不完整的 v5 结果事件。");
             node.LatencyMs = result.metrics.latency_nanoseconds.Value / 1000000D;
             node.DownloadTested = result.metrics.download_tested.Value;
-            node.UploadTested = result.metrics.upload_tested.Value;
             node.DownloadComplete = result.metrics.download_complete.Value;
-            node.UploadComplete = result.metrics.upload_complete.Value;
             node.DownloadMbps = result.metrics.download_bytes_per_second.Value / 1024D / 1024D;
-            node.UploadMbps = result.metrics.upload_bytes_per_second.Value / 1024D / 1024D;
             node.State = result.usable.Value ? "有效" : "失败";
+            node.StatusDetail = "";
             node.RegionState = result.usable.Value ? "未查询" : "不查询";
         }
     }
@@ -639,6 +653,8 @@ namespace ClashSpeedTestGUI
         private readonly Dictionary<string, NodeManifestEvent> nodes =
             new Dictionary<string, NodeManifestEvent>(StringComparer.Ordinal);
         private readonly HashSet<string> results = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> probeCompleted = new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> downloadStarted = new HashSet<string>(StringComparer.Ordinal);
         private readonly HashSet<string> legacyNodeMirrors =
             new HashSet<string>(StringComparer.Ordinal);
         private int legacyResultMirrorCount;
@@ -665,6 +681,7 @@ namespace ClashSpeedTestGUI
                 {
                     return protocolAccepted && headerAccepted && nodeCountAccepted
                         && expectedNodeCount > 0 && nodes.Count == expectedNodeCount
+                        && probeCompleted.Count == expectedNodeCount
                         && results.Count == expectedNodeCount;
                 }
             }
@@ -684,32 +701,34 @@ namespace ClashSpeedTestGUI
         {
             string[] topLevelKeys = { "id", "cells", "usable", "metrics" };
             if (!HasExactKeys(value, topLevelKeys))
-                Reject("v4 结果事件顶层字段不完整或包含未知字段。");
+                Reject("v5 结果事件顶层字段不完整或包含未知字段。");
             object[] cells = value["cells"] as object[];
             if (!(value["id"] is string) || cells == null
                 || cells.Any(delegate(object cell) { return !(cell is string); })
                 || !(value["usable"] is bool))
-                Reject("v4 结果事件的 id、cells 或 usable 类型错误。");
+                Reject("v5 结果事件的 id、cells 或 usable 类型错误。");
             Dictionary<string, object> metrics = value["metrics"] as Dictionary<string, object>;
             string[] metricKeys =
             {
-                "latency_nanoseconds", "jitter_nanoseconds", "packet_loss_percent",
-                "download_bytes_per_second", "upload_bytes_per_second",
-                "download_tested", "upload_tested",
-                "download_complete", "upload_complete"
+                "latency_nanoseconds", "jitter_nanoseconds", "http_probe_failure_percent",
+                "download_bytes_per_second", "download_tested", "download_complete"
             };
             if (!HasExactKeys(metrics, metricKeys))
-                Reject("v4 结果事件原始指标字段不完整或包含未知字段。");
+                Reject("v5 结果事件原始指标字段不完整或包含未知字段。");
             if (!IsJsonInteger(metrics["latency_nanoseconds"])
                 || !IsJsonInteger(metrics["jitter_nanoseconds"])
-                || !IsJsonNumber(metrics["packet_loss_percent"])
+                || !IsJsonNumber(metrics["http_probe_failure_percent"])
                 || !IsJsonNumber(metrics["download_bytes_per_second"])
-                || !IsJsonNumber(metrics["upload_bytes_per_second"])
                 || !(metrics["download_tested"] is bool)
-                || !(metrics["upload_tested"] is bool)
-                || !(metrics["download_complete"] is bool)
-                || !(metrics["upload_complete"] is bool))
-                Reject("v4 结果事件原始指标字段类型错误。");
+                || !(metrics["download_complete"] is bool))
+                Reject("v5 结果事件原始指标字段类型错误。");
+        }
+
+        public static void ValidateProgressEnvelope(Dictionary<string, object> value)
+        {
+            if (!HasExactKeys(value, new[] { "id", "stage" })
+                || !(value["id"] is string) || !(value["stage"] is string))
+                Reject("v5 进度事件字段不完整、包含未知字段或类型错误。");
         }
 
         private static bool IsJsonInteger(object value)
@@ -736,9 +755,10 @@ namespace ClashSpeedTestGUI
         {
             lock (sync)
             {
-                if (protocolAccepted || headerAccepted || nodeCountAccepted || nodes.Count > 0 || results.Count > 0)
+                if (protocolAccepted || headerAccepted || nodeCountAccepted || nodes.Count > 0
+                    || probeCompleted.Count > 0 || downloadStarted.Count > 0 || results.Count > 0)
                     Reject("协议版本行重复或顺序错误。");
-                if (version != 4) Reject("仅支持测速事件协议 v4，实际为 v" + version + "。");
+                if (version != 5) Reject("仅支持测速事件协议 v5，实际为 v" + version + "。");
                 protocolAccepted = true;
             }
         }
@@ -773,7 +793,8 @@ namespace ClashSpeedTestGUI
             lock (sync)
             {
                 if (!nodeCountAccepted) Reject("节点事件出现在节点总数之前。");
-                if (results.Count > 0) Reject("结果事件开始后又收到节点事件。");
+                if (probeCompleted.Count > 0 || downloadStarted.Count > 0 || results.Count > 0)
+                    Reject("进度或结果事件开始后又收到节点事件。");
                 if (value == null || string.IsNullOrWhiteSpace(value.id)
                     || string.IsNullOrWhiteSpace(value.name) || string.IsNullOrWhiteSpace(value.type)
                     || value.config == null)
@@ -792,6 +813,36 @@ namespace ClashSpeedTestGUI
             }
         }
 
+        public void AcceptProgress(NodeProgressEvent value)
+        {
+            lock (sync)
+            {
+                if (!nodeCountAccepted || nodes.Count != expectedNodeCount)
+                    Reject("进度事件在完整节点清单之前到达。");
+                if (value == null || string.IsNullOrWhiteSpace(value.id)
+                    || string.IsNullOrWhiteSpace(value.stage))
+                    Reject("进度事件缺少稳定节点 ID 或阶段。");
+                if (!nodes.ContainsKey(value.id)) Reject("进度引用未知节点 ID：" + value.id);
+                if (results.Contains(value.id)) Reject("最终结果后又收到进度事件：" + value.id);
+
+                if (string.Equals(value.stage, "probe_completed", StringComparison.Ordinal))
+                {
+                    if (!probeCompleted.Add(value.id)) Reject("节点 probe_completed 重复：" + value.id);
+                    return;
+                }
+                if (string.Equals(value.stage, "download_started", StringComparison.Ordinal))
+                {
+                    if (expectedHeaders.IndexOf("下载速度") < 0)
+                        Reject("快速模式不能出现 download_started。");
+                    if (!probeCompleted.Contains(value.id))
+                        Reject("download_started 必须发生在 probe_completed 之后：" + value.id);
+                    if (!downloadStarted.Add(value.id)) Reject("节点 download_started 重复：" + value.id);
+                    return;
+                }
+                Reject("未知测速进度阶段：" + value.stage);
+            }
+        }
+
         public void AcceptResult(NodeResultEvent value)
         {
             lock (sync)
@@ -802,11 +853,15 @@ namespace ClashSpeedTestGUI
                     Reject("结果事件缺少 id 或单元格。");
                 NodeManifestEvent node;
                 if (!nodes.TryGetValue(value.id, out node)) Reject("结果引用未知节点 ID：" + value.id);
+                if (!probeCompleted.Contains(value.id))
+                    Reject("最终结果出现在 probe_completed 之前：" + value.id);
                 if (results.Contains(value.id)) Reject("节点结果重复：" + value.id);
                 if (value.cells.Length != expectedHeaders.Count) Reject("结果列数与表头不匹配。");
                 if (value.cells.Any(delegate(string cell) { return cell == null; }))
                     Reject("结果事件包含空单元格。");
                 ValidateResultMetrics(value);
+                if (value.metrics.download_tested.Value != downloadStarted.Contains(value.id))
+                    Reject("下载测试标志与 download_started 进度不一致：" + value.id);
                 int nameIndex = expectedHeaders.IndexOf("节点名称");
                 int typeIndex = expectedHeaders.IndexOf("类型");
                 if (nameIndex < 0 || typeIndex < 0
@@ -824,55 +879,35 @@ namespace ClashSpeedTestGUI
             if (!value.usable.HasValue || metrics == null
                 || !metrics.latency_nanoseconds.HasValue
                 || !metrics.jitter_nanoseconds.HasValue
-                || !metrics.packet_loss_percent.HasValue
+                || !metrics.http_probe_failure_percent.HasValue
                 || !metrics.download_bytes_per_second.HasValue
-                || !metrics.upload_bytes_per_second.HasValue
                 || !metrics.download_tested.HasValue
-                || !metrics.upload_tested.HasValue
-                || !metrics.download_complete.HasValue
-                || !metrics.upload_complete.HasValue)
-                Reject("v4 结果事件缺少 usable 或原始指标字段。");
+                || !metrics.download_complete.HasValue)
+                Reject("v5 结果事件缺少 usable 或原始指标字段。");
 
-            double packetLoss = metrics.packet_loss_percent.Value;
+            double probeFailure = metrics.http_probe_failure_percent.Value;
             double downloadSpeed = metrics.download_bytes_per_second.Value;
-            double uploadSpeed = metrics.upload_bytes_per_second.Value;
             if (metrics.latency_nanoseconds.Value < 0 || metrics.jitter_nanoseconds.Value < 0
-                || !IsFinite(packetLoss) || packetLoss < 0 || packetLoss > 100
-                || !IsFinite(downloadSpeed) || downloadSpeed < 0
-                || !IsFinite(uploadSpeed) || uploadSpeed < 0)
-                Reject("v4 结果事件包含越界或非有限原始指标。");
+                || !IsFinite(probeFailure) || probeFailure < 0 || probeFailure > 100
+                || !IsFinite(downloadSpeed) || downloadSpeed < 0)
+                Reject("v5 结果事件包含越界或非有限原始指标。");
 
             bool fast = expectedHeaders.IndexOf("下载速度") < 0;
-            bool downloadMode = expectedHeaders.IndexOf("下载速度") >= 0
-                && expectedHeaders.IndexOf("上传速度") < 0;
-            if (fast && (metrics.download_tested.Value || metrics.upload_tested.Value
-                || metrics.download_complete.Value || metrics.upload_complete.Value))
-                Reject("快速模式结果不能标记下载或上传已测试/已完成。");
-            if (downloadMode && (metrics.upload_tested.Value || metrics.upload_complete.Value))
-                Reject("下载模式结果不能标记上传已测试/已完成。");
+            if (fast && (metrics.download_tested.Value || metrics.download_complete.Value))
+                Reject("快速模式结果不能标记下载已测试或已完成。");
             if (metrics.download_complete.Value && !metrics.download_tested.Value)
                 Reject("下载未启动时不能标记为传输完成。");
-            if (metrics.upload_complete.Value && !metrics.upload_tested.Value)
-                Reject("上传未启动时不能标记为传输完成。");
             if (!metrics.download_tested.Value && downloadSpeed != 0)
                 Reject("未执行下载测试却返回了非零下载速度。");
-            if (!metrics.upload_tested.Value && uploadSpeed != 0)
-                Reject("未执行上传测试却返回了非零上传速度。");
             if (metrics.download_complete.Value && downloadSpeed <= 0)
                 Reject("标记下载完成时必须返回正速度。");
-            if (metrics.upload_complete.Value && uploadSpeed <= 0)
-                Reject("标记上传完成时必须返回正速度。");
             if (value.usable.Value
-                && (metrics.latency_nanoseconds.Value <= 0 || packetLoss >= 100))
+                && (metrics.latency_nanoseconds.Value <= 0 || probeFailure >= 100))
                 Reject("标记为有效的结果缺少可用延迟或 HTTP 探测失败率无效。");
             if (value.usable.Value && !fast
                 && (!metrics.download_tested.Value || !metrics.download_complete.Value
                     || downloadSpeed <= 0))
                 Reject("标记为有效的结果必须完整执行下载传输。");
-            if (value.usable.Value && !fast && !downloadMode
-                && (!metrics.upload_tested.Value || !metrics.upload_complete.Value
-                    || uploadSpeed <= 0))
-                Reject("完整模式的有效结果必须完整执行上传传输。");
         }
 
         private static bool IsFinite(double value)
@@ -916,6 +951,8 @@ namespace ClashSpeedTestGUI
                 if (!nodeCountAccepted) Reject("缺少节点总数。");
                 if (nodes.Count != expectedNodeCount)
                     Reject("节点清单不完整：收到 " + nodes.Count + "，应为 " + expectedNodeCount + "。");
+                if (probeCompleted.Count != expectedNodeCount)
+                    Reject("探测进度不完整：收到 " + probeCompleted.Count + "，应为 " + expectedNodeCount + "。");
                 if (results.Count != expectedNodeCount)
                     Reject("节点结果不完整：收到 " + results.Count + "，应为 " + expectedNodeCount + "。");
             }
@@ -1151,6 +1188,7 @@ namespace ClashSpeedTestGUI
     internal enum NodeUiUpdateKind
     {
         Manifest,
+        Progress,
         Result
     }
 
@@ -1159,6 +1197,7 @@ namespace ClashSpeedTestGUI
         public int OperationId;
         public NodeUiUpdateKind Kind;
         public NodeSnapshot Node;
+        public NodeProgressEvent Progress;
         public NodeResultEvent Result;
     }
 
@@ -1429,7 +1468,7 @@ namespace ClashSpeedTestGUI
 
             switch (header)
             {
-                case "延迟":
+                case "HTTP 延迟":
                     return CompareMeasured(leftNode == null ? 0 : leftNode.LatencyMs,
                         leftNode != null && leftNode.LatencyMs > 0,
                         rightNode == null ? 0 : rightNode.LatencyMs,
@@ -1440,12 +1479,6 @@ namespace ClashSpeedTestGUI
                         leftNode != null && leftNode.DownloadTested && leftNode.DownloadMbps > 0,
                         rightNode == null ? 0 : rightNode.DownloadMbps,
                         rightNode != null && rightNode.DownloadTested && rightNode.DownloadMbps > 0,
-                        leftNode, rightNode);
-                case "上传速度":
-                    return CompareMeasured(leftNode == null ? 0 : leftNode.UploadMbps,
-                        leftNode != null && leftNode.UploadTested && leftNode.UploadMbps > 0,
-                        rightNode == null ? 0 : rightNode.UploadMbps,
-                        rightNode != null && rightNode.UploadTested && rightNode.UploadMbps > 0,
                         leftNode, rightNode);
                 case "状态":
                     result = CompareStatus(leftNode, rightNode);
@@ -1553,7 +1586,7 @@ namespace ClashSpeedTestGUI
     {
         public static readonly string[] Headers =
         {
-            "序号", "节点名称", "类型", "延迟", "下载速度", "上传速度", "出口地区", "状态"
+            "序号", "节点名称", "类型", "HTTP 延迟", "下载速度", "出口地区", "状态"
         };
         public static readonly object[] RegionFilterOptions =
         {
@@ -1580,8 +1613,7 @@ namespace ClashSpeedTestGUI
         {
             if (node == null) return "";
             if (string.Equals(node.State, "失败", StringComparison.Ordinal)
-                && ((node.DownloadTested && !node.DownloadComplete)
-                    || (node.UploadTested && !node.UploadComplete)))
+                && node.DownloadTested && !node.DownloadComplete)
                 return "失败（传输未完成）";
             return node.State ?? "";
         }
@@ -1711,12 +1743,11 @@ namespace ClashSpeedTestGUI
         private TextBox blockText;
         private TextBox serverUrlText;
         private NumericUpDown downloadSizeNumber;
-        private NumericUpDown uploadSizeNumber;
+        private NumericUpDown probeTimeoutNumber;
         private NumericUpDown timeoutNumber;
         private NumericUpDown concurrentNumber;
         private NumericUpDown transferConcurrentNumber;
-        private NumericUpDown packetLossNumber;
-        private NumericUpDown uploadSpeedNumber;
+        private NumericUpDown probeFailureNumber;
         private TextBox userAgentText;
 
         private AppSettings settings;
@@ -1740,6 +1771,8 @@ namespace ClashSpeedTestGUI
         private int manifestRowCount;
         private int displayedResultCount;
         private int displayedPassedCount;
+        private int displayedProbeCount;
+        private string displayedDownloadingNode = "";
         private bool userSelectedSort;
         private string activeSortHeader = "";
         private ListSortDirection activeSortDirection = ListSortDirection.Ascending;
@@ -2438,10 +2471,14 @@ namespace ClashSpeedTestGUI
                 bool reportedUsable = string.Equals(node.State, "有效", StringComparison.Ordinal);
                 if (valid != reportedUsable)
                     throw new InvalidOperationException(
-                        "v4 权威结果与临时输出状态不一致，节点 ID：" + node.Id);
+                        "v5 权威结果与临时输出状态不一致，节点 ID：" + node.Id);
                 node.Exported = valid;
                 node.State = valid ? "有效" : "失败";
-                node.RegionState = valid ? "未查询" : "不查询";
+                if (!valid)
+                    node.RegionState = "不查询";
+                else if (!string.Equals(node.RegionState, "成功", StringComparison.Ordinal)
+                    && !string.Equals(node.RegionState, "查询失败", StringComparison.Ordinal))
+                    node.RegionState = "未查询";
                 if (valid) validCount++;
                 DataGridViewRow row;
                 if (!nodeRows.TryGetValue(node.Id, out row)) continue;
@@ -2751,7 +2788,10 @@ namespace ClashSpeedTestGUI
             int failed = nodes.Count(delegate(NodeSnapshot node)
                 { return string.Equals(node.State, "失败", StringComparison.Ordinal); });
             int waiting = nodes.Count(delegate(NodeSnapshot node)
-                { return string.Equals(node.State, "等待", StringComparison.Ordinal); });
+                {
+                    return !string.Equals(node.State, "有效", StringComparison.Ordinal)
+                        && !string.Equals(node.State, "失败", StringComparison.Ordinal);
+                });
             statisticsLabel.Text = StatusStatistics.Format(
                 nodes.Count, visible, selected, valid, failed, waiting);
         }
@@ -2810,7 +2850,7 @@ namespace ClashSpeedTestGUI
             {
                 Name = "RenameNodesCheckBox",
                 TabIndex = 7,
-                Text = "按 IP 地区重命名节点（例如：🇭🇰 香港 HK-01）",
+                Text = "按真实出口地区重命名节点（例如：🇭🇰 香港 HK-01）",
                 Location = new Point(100, 229),
                 AutoSize = true
             };
@@ -2934,7 +2974,7 @@ namespace ClashSpeedTestGUI
             {
                 "快速（仅延迟）",
                 "均衡（推荐）",
-                "深度（含上传）",
+                "深度（大流量纯下载）",
                 "自定义"
             });
             presetCombo.SelectedIndexChanged += delegate { ApplySelectedPreset(); };
@@ -3014,7 +3054,7 @@ namespace ClashSpeedTestGUI
                 Width = 120,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
-            modeCombo.Items.AddRange(new object[] { "fast", "download", "full" });
+            modeCombo.Items.AddRange(new object[] { "fast", "download" });
             modeCombo.SelectedIndexChanged += delegate
             {
                 UpdateModeControlState();
@@ -3044,50 +3084,43 @@ namespace ClashSpeedTestGUI
             downloadSizeNumber.TabIndex = 4;
             AddLabel(group, "MB", 160, 98, 30);
 
-            AddLabel(group, "上传量：", 205, 98, 65);
-            uploadSizeNumber = AddNumber(group, 270, 93, 75, 1, 10240, 0);
-            uploadSizeNumber.Name = "UploadSizeInput";
-            uploadSizeNumber.TabIndex = 5;
-            AddLabel(group, "MB", 350, 98, 30);
+            AddLabel(group, "探测超时：", 205, 98, 70);
+            probeTimeoutNumber = AddNumber(group, 275, 93, 70, 0.1M, 60, 1);
+            probeTimeoutNumber.Name = "ProbeTimeoutInput";
+            probeTimeoutNumber.TabIndex = 5;
+            AddLabel(group, "秒", 350, 98, 30);
 
-            AddLabel(group, "超时：", 395, 98, 50);
-            timeoutNumber = AddNumber(group, 445, 93, 75, 0.1M, 3600, 1);
-            timeoutNumber.Name = "TimeoutInput";
+            AddLabel(group, "下载超时：", 395, 98, 70);
+            timeoutNumber = AddNumber(group, 465, 93, 70, 0.1M, 3600, 1);
+            timeoutNumber.Name = "DownloadTimeoutInput";
             timeoutNumber.TabIndex = 6;
-            AddLabel(group, "秒", 525, 98, 30);
+            AddLabel(group, "秒", 540, 98, 30);
 
             AddLabel(group, "延迟并发：", 565, 98, 70);
             concurrentNumber = AddNumber(group, 635, 93, 60, 1, 128, 0);
             concurrentNumber.Name = "NodeConcurrencyInput";
             concurrentNumber.TabIndex = 7;
 
-            AddLabel(group, "探测失败：", 715, 98, 75);
-            packetLossNumber = AddNumber(group, 790, 93, 75, 0, 100, 1);
-            packetLossNumber.Name = "PacketLossLimitInput";
-            packetLossNumber.TabIndex = 8;
-            AddLabel(group, "%", 870, 98, 20);
+            AddLabel(group, "HTTP 探测失败率：", 715, 98, 125);
+            probeFailureNumber = AddNumber(group, 840, 93, 55, 0, 100, 1);
+            probeFailureNumber.Name = "ProbeFailureLimitInput";
+            probeFailureNumber.TabIndex = 8;
+            AddLabel(group, "%", 900, 98, 20);
 
-            AddLabel(group, "上传下限：", 895, 98, 75);
-            uploadSpeedNumber = AddNumber(group, 970, 93, 75, 0, 100000, 2);
-            uploadSpeedNumber.Name = "UploadLimitInput";
-            uploadSpeedNumber.TabIndex = 9;
-            AddLabel(group, "MB/s", 1050, 98, 45);
-
-            AddLabel(group, "单节点传输连接：", 15, 133, 115);
+            AddLabel(group, "单节点下载连接：", 15, 133, 115);
             transferConcurrentNumber = AddNumber(group, 130, 128, 65, 1, 16, 0);
             transferConcurrentNumber.Name = "TransferConcurrencyInput";
             transferConcurrentNumber.TabIndex = 10;
-            AddLabel(group, "仅 download/full 模式生效；吞吐阶段每次只测一个节点", 205, 133, 500);
+            AddLabel(group, "仅 download 模式生效；节点间串行下载，当前节点内部允许多连接", 205, 133, 600);
 
             latencyNumber.ValueChanged += delegate { MarkPresetCustom(); };
             downloadSpeedNumber.ValueChanged += delegate { MarkPresetCustom(); };
             downloadSizeNumber.ValueChanged += delegate { MarkPresetCustom(); };
-            uploadSizeNumber.ValueChanged += delegate { MarkPresetCustom(); };
+            probeTimeoutNumber.ValueChanged += delegate { MarkPresetCustom(); };
             timeoutNumber.ValueChanged += delegate { MarkPresetCustom(); };
             concurrentNumber.ValueChanged += delegate { MarkPresetCustom(); };
             transferConcurrentNumber.ValueChanged += delegate { MarkPresetCustom(); };
-            packetLossNumber.ValueChanged += delegate { MarkPresetCustom(); };
-            uploadSpeedNumber.ValueChanged += delegate { MarkPresetCustom(); };
+            probeFailureNumber.ValueChanged += delegate { MarkPresetCustom(); };
 
             return group;
         }
@@ -3109,12 +3142,11 @@ namespace ClashSpeedTestGUI
             blockText.Text = settings.BlockKeywords;
             serverUrlText.Text = settings.ServerUrl;
             SetNumber(downloadSizeNumber, settings.DownloadSizeMb);
-            SetNumber(uploadSizeNumber, settings.UploadSizeMb);
+            SetNumber(probeTimeoutNumber, settings.ProbeTimeoutSeconds);
             SetNumber(timeoutNumber, settings.TimeoutSeconds);
             SetNumber(concurrentNumber, settings.Concurrent);
             SetNumber(transferConcurrentNumber, settings.TransferConcurrent);
-            SetNumber(packetLossNumber, settings.MaxPacketLoss);
-            SetNumber(uploadSpeedNumber, settings.MinUploadSpeed);
+            SetNumber(probeFailureNumber, settings.MaxHTTPProbeFailure);
             userAgentText.Text = settings.UserAgent;
 
             SelectMatchingPreset();
@@ -3149,12 +3181,11 @@ namespace ClashSpeedTestGUI
                 BlockKeywords = blockText.Text.Trim(),
                 ServerUrl = serverUrlText.Text.Trim(),
                 DownloadSizeMb = downloadSizeNumber.Value,
-                UploadSizeMb = uploadSizeNumber.Value,
+                ProbeTimeoutSeconds = probeTimeoutNumber.Value,
                 TimeoutSeconds = timeoutNumber.Value,
                 Concurrent = concurrentNumber.Value,
                 TransferConcurrent = transferConcurrentNumber.Value,
-                MaxPacketLoss = packetLossNumber.Value,
-                MinUploadSpeed = uploadSpeedNumber.Value,
+                MaxHTTPProbeFailure = probeFailureNumber.Value,
                 UserAgent = userAgentText.Text.Trim()
             };
         }
@@ -3182,12 +3213,11 @@ namespace ClashSpeedTestGUI
                 BlockKeywords = blockText.Text.Trim(),
                 ServerUrl = serverUrlText.Text.Trim(),
                 DownloadSizeBytes = MegabytesToBytes(downloadSizeNumber.Value),
-                UploadSizeBytes = MegabytesToBytes(uploadSizeNumber.Value),
+                ProbeTimeoutSeconds = (double)probeTimeoutNumber.Value,
                 TimeoutSeconds = (double)timeoutNumber.Value,
                 NodeConcurrent = Decimal.ToInt32(concurrentNumber.Value),
                 TransferConcurrent = Decimal.ToInt32(transferConcurrentNumber.Value),
-                MaxPacketLoss = (double)packetLossNumber.Value,
-                MinUploadSpeed = (double)uploadSpeedNumber.Value,
+                MaxHTTPProbeFailure = (double)probeFailureNumber.Value,
                 UserAgent = userAgentText.Text.Trim()
             };
         }
@@ -3307,6 +3337,8 @@ namespace ClashSpeedTestGUI
                 manifestRowCount = 0;
                 displayedResultCount = 0;
                 displayedPassedCount = 0;
+                displayedProbeCount = 0;
+                displayedDownloadingNode = "";
                 userSelectedSort = false;
                 activeSortHeader = "";
                 ResetRegionFilterOptions();
@@ -3329,6 +3361,7 @@ namespace ClashSpeedTestGUI
                 ApplyDefaultNodeSort();
                 if (!string.IsNullOrWhiteSpace(result.ProtocolError))
                 {
+                    MarkPendingNodesFailed(result.ProtocolError);
                     MessageBox.Show(this, result.ProtocolError, "内核输出协议错误",
                         MessageBoxButtons.OK, MessageBoxIcon.Error);
                     SetStatus("测速失败：内核输出协议错误");
@@ -3338,6 +3371,7 @@ namespace ClashSpeedTestGUI
                 if (result.ExitCode != 0)
                 {
                     string error = string.IsNullOrWhiteSpace(result.ErrorText) ? "内核退出代码：" + result.ExitCode : result.ErrorText;
+                    MarkPendingNodesFailed(error);
                     MessageBox.Show(this, error, "测速失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     SetStatus("测速失败");
                     return;
@@ -3383,24 +3417,11 @@ namespace ClashSpeedTestGUI
                     operation.Token.ThrowIfCancellationRequested();
                     if (options.RenameNodes)
                     {
-                        Dictionary<string, string> renames =
-                            LabelFormatter.BuildRenameMap(authoritativeOutput.nodes);
-                        if (renames.Count > 0)
-                        {
-                            NodeManagementRequest renameRequest = new NodeManagementRequest
-                            {
-                                renames = renames,
-                                deletes = new string[0]
-                            };
-                            authoritativeOutput = await Task.Run(delegate
-                            {
-                                return RunNodeManagement(
-                                    options.CoreOutputPath, renameRequest, operation.Token);
-                            }, operation.Token);
-                            operation.Token.ThrowIfCancellationRequested();
-                            result.PassedRows = ReconcileSpeedExportState(authoritativeOutput.nodes);
-                            passedRowCount = result.PassedRows;
-                        }
+                        authoritativeOutput = await ApplyAutomaticExitRegionRenameAsync(
+                            authoritativeOutput, options, operation);
+                        operation.Token.ThrowIfCancellationRequested();
+                        result.PassedRows = ReconcileSpeedExportState(authoritativeOutput.nodes);
+                        passedRowCount = result.PassedRows;
                     }
                     operation.Token.ThrowIfCancellationRequested();
                     AtomicFile.Commit(options.CoreOutputPath, options.OutputPath);
@@ -3483,8 +3504,9 @@ namespace ClashSpeedTestGUI
             {
                 if (operation != null && operation.IsCancellationRequested)
                 {
+                    MarkPendingNodesFailed("任务已取消");
                     SetStatus(operation.OutputCommitted
-                        ? "已停止后续处理；本地结果已保存；Gist 后续请求已取消，如已进入上传阶段请检查远端结果"
+                        ? "已停止后续处理；本地结果已保存；Gist 后续请求已取消，如已进入 Gist 上传阶段请检查远端结果"
                         : "测速已停止；本地输出未修改，Gist 未上传");
                 }
                 else
@@ -3498,8 +3520,9 @@ namespace ClashSpeedTestGUI
             {
                 if (operation != null && operation.IsCancellationRequested)
                 {
+                    MarkPendingNodesFailed("任务已取消");
                     SetStatus(operation.OutputCommitted
-                        ? "已停止后续处理；本地结果已保存；Gist 后续请求已取消，如已进入上传阶段请检查远端结果"
+                        ? "已停止后续处理；本地结果已保存；Gist 后续请求已取消，如已进入 Gist 上传阶段请检查远端结果"
                         : "测速已停止；本地输出未修改，Gist 未上传");
                     return;
                 }
@@ -3741,26 +3764,15 @@ namespace ClashSpeedTestGUI
             AddArgument(values, "-server-url", options.ServerUrl);
             AddArgument(values, "-speed-mode", options.SpeedMode);
             AddArgument(values, "-download-size", options.DownloadSizeBytes.ToString(CultureInfo.InvariantCulture));
-            AddArgument(values, "-upload-size", options.UploadSizeBytes.ToString(CultureInfo.InvariantCulture));
+            AddArgument(values, "-probe-timeout", options.ProbeTimeoutSeconds.ToString("0.###", CultureInfo.InvariantCulture) + "s");
             AddArgument(values, "-timeout", options.TimeoutSeconds.ToString("0.###", CultureInfo.InvariantCulture) + "s");
             AddArgument(values, "-concurrent", options.TransferConcurrent.ToString(CultureInfo.InvariantCulture));
             AddArgument(values, "-node-concurrent", options.NodeConcurrent.ToString(CultureInfo.InvariantCulture));
             AddArgument(values, "-output", options.CoreOutputPath);
             AddArgument(values, "-max-latency", options.MaxLatencyMs.ToString("0.###", CultureInfo.InvariantCulture) + "ms");
-            AddArgument(values, "-max-packet-loss", options.MaxPacketLoss.ToString("0.###", CultureInfo.InvariantCulture));
+            AddArgument(values, "-max-probe-failure", options.MaxHTTPProbeFailure.ToString("0.###", CultureInfo.InvariantCulture));
             AddArgument(values, "-min-download-speed", options.MinDownloadSpeed.ToString("0.###", CultureInfo.InvariantCulture));
-            AddArgument(values, "-min-upload-speed", options.MinUploadSpeed.ToString("0.###", CultureInfo.InvariantCulture));
             if (!string.IsNullOrWhiteSpace(options.UserAgent)) AddArgument(values, "-ua", options.UserAgent);
-
-            if (options.RenameNodes)
-            {
-                values.Add("-rename=true");
-                AddArgument(values, "-rename-template", "__CSTGUI__{{.CountryCode}}__{{.Index}}");
-            }
-            else
-            {
-                values.Add("-rename=false");
-            }
 
             return string.Join(" ", values.ToArray());
         }
@@ -3843,6 +3855,13 @@ namespace ClashSpeedTestGUI
                 HandleResultJson(cells[1], validator, operation);
                 return;
             }
+            if (line.StartsWith("@progressjson\t", StringComparison.Ordinal))
+            {
+                if (cells.Length != 2 || string.IsNullOrWhiteSpace(cells[1]))
+                    throw new InvalidOperationException("进度事件行格式错误。");
+                HandleProgressJson(cells[1], validator, operation);
+                return;
+            }
 
             if (line.StartsWith("@", StringComparison.Ordinal))
                 throw new InvalidOperationException("未知事件：" + cells[0]);
@@ -3882,7 +3901,7 @@ namespace ClashSpeedTestGUI
                 ShareUrl = value.share_url ?? "",
                 ShareError = value.share_error ?? "",
                 Config = value.config,
-                State = "等待",
+                State = "等待探测",
                 RegionState = "—"
             };
             nodeUiUpdates.Enqueue(new NodeUiUpdate
@@ -3927,6 +3946,41 @@ namespace ClashSpeedTestGUI
                 OperationId = operation.Id,
                 Kind = NodeUiUpdateKind.Result,
                 Result = value
+            });
+        }
+
+        private void HandleProgressJson(
+            string encoded, RunnerProtocolValidator validator, TaskOperation operation)
+        {
+            string json;
+            try
+            {
+                json = DecodeNodeEventJson(encoded);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException("进度事件不是有效的 Base64 UTF-8 数据。", ex);
+            }
+
+            NodeProgressEvent value;
+            try
+            {
+                Dictionary<string, object> envelope =
+                    nodeSerializer.DeserializeObject(json) as Dictionary<string, object>;
+                RunnerProtocolValidator.ValidateProgressEnvelope(envelope);
+                value = nodeSerializer.Deserialize<NodeProgressEvent>(json);
+            }
+            catch (Exception ex)
+            {
+                throw new InvalidOperationException("进度事件字段无效：" + ex.Message, ex);
+            }
+            validator.AcceptProgress(value);
+            operation.Token.ThrowIfCancellationRequested();
+            nodeUiUpdates.Enqueue(new NodeUiUpdate
+            {
+                OperationId = operation.Id,
+                Kind = NodeUiUpdateKind.Progress,
+                Progress = value
             });
         }
 
@@ -3975,6 +4029,8 @@ namespace ClashSpeedTestGUI
                             AddNodeRowCore(update.Node);
                             manifestChanged = true;
                         }
+                        else if (update.Kind == NodeUiUpdateKind.Progress)
+                            UpdateNodeProgressCore(update.Progress);
                         else if (update.Kind == NodeUiUpdateKind.Result)
                             UpdateNodeRowCore(update.Result);
                     }
@@ -3999,10 +4055,7 @@ namespace ClashSpeedTestGUI
                 ApplyNodeFilters();
                 SetStatus(!string.IsNullOrWhiteSpace(sortError)
                     ? "列表排序暂时失败，将在下一批重试：" + sortError
-                    : displayedResultCount > 0
-                        ? "已完成 " + displayedResultCount + "/" + manifestRowCount
-                            + "，有效 " + displayedPassedCount + " 个"
-                        : "已加载 " + manifestRowCount + " 个节点，等待测速");
+                    : FormatSpeedProgress());
             }
             finally
             {
@@ -4015,7 +4068,7 @@ namespace ClashSpeedTestGUI
             if (node == null || string.IsNullOrWhiteSpace(node.Id)
                 || nodesById.ContainsKey(node.Id)) return;
             nodesById[node.Id] = node;
-            object[] values = Enumerable.Repeat<object>("等待", resultGrid.Columns.Count).ToArray();
+            object[] values = Enumerable.Repeat<object>("等待探测", resultGrid.Columns.Count).ToArray();
             int rowIndex = resultGrid.Rows.Add(values);
             DataGridViewRow row = resultGrid.Rows[rowIndex];
             row.Tag = node;
@@ -4023,12 +4076,83 @@ namespace ClashSpeedTestGUI
             SetRowValue(row, "序号", (manifestRowCount + 1).ToString(CultureInfo.InvariantCulture));
             SetRowValue(row, "节点名称", node.Name);
             SetRowValue(row, "类型", node.Type);
-            SetRowValue(row, "延迟", NodeListPresentation.MetricText(false, null));
+            SetRowValue(row, "HTTP 延迟", NodeListPresentation.MetricText(false, null));
             SetRowValue(row, "下载速度", NodeListPresentation.MetricText(false, null));
-            SetRowValue(row, "上传速度", NodeListPresentation.MetricText(false, null));
             SetRegionCell(row, node);
             SetNodeStatusCell(row, node);
             manifestRowCount++;
+        }
+
+        private string FormatSpeedProgress()
+        {
+            int waitingDownload = nodesById.Values.Count(delegate(NodeSnapshot node)
+            {
+                return string.Equals(node.State, "等待下载", StringComparison.Ordinal);
+            });
+            int valid = nodesById.Values.Count(delegate(NodeSnapshot node)
+            {
+                return string.Equals(node.State, "有效", StringComparison.Ordinal);
+            });
+            int failed = nodesById.Values.Count(delegate(NodeSnapshot node)
+            {
+                return string.Equals(node.State, "失败", StringComparison.Ordinal);
+            });
+            int waiting = Math.Max(0, nodesById.Count - valid - failed);
+            string downloading = nodesById.Values
+                .Where(delegate(NodeSnapshot node)
+                {
+                    return string.Equals(node.State, "下载中", StringComparison.Ordinal);
+                })
+                .Select(delegate(NodeSnapshot node) { return node.Name; })
+                .FirstOrDefault() ?? displayedDownloadingNode;
+            if (string.IsNullOrWhiteSpace(downloading)) downloading = "—";
+            return "已探测 " + displayedProbeCount + "/" + manifestRowCount
+                + " | 等待下载 " + waitingDownload
+                + " | 正在下载：" + downloading
+                + " | 有效 " + valid + " | 失败 " + failed + " | 等待 " + waiting;
+        }
+
+        private void MarkPendingNodesFailed(string reason)
+        {
+            foreach (NodeSnapshot node in nodesById.Values)
+            {
+                if (string.Equals(node.State, "有效", StringComparison.Ordinal)
+                    || string.Equals(node.State, "失败", StringComparison.Ordinal)) continue;
+                node.State = "失败";
+                node.StatusDetail = string.IsNullOrWhiteSpace(reason) ? "任务未正常完成" : reason;
+                node.RegionState = "不查询";
+                DataGridViewRow row;
+                if (!nodeRows.TryGetValue(node.Id, out row)) continue;
+                SetNodeStatusCell(row, node);
+                SetRegionCell(row, node);
+                ApplyRowStateStyle(row, false);
+            }
+            displayedDownloadingNode = "";
+            UpdateStatistics();
+        }
+
+        private void UpdateNodeProgressCore(NodeProgressEvent progress)
+        {
+            if (progress == null) return;
+            NodeSnapshot node;
+            DataGridViewRow row;
+            if (!nodesById.TryGetValue(progress.id, out node)
+                || !nodeRows.TryGetValue(progress.id, out row)) return;
+            if (string.Equals(progress.stage, "probe_completed", StringComparison.Ordinal))
+            {
+                node.ProbeCompleted = true;
+                displayedProbeCount++;
+                node.State = string.Equals(activeOptions == null ? "" : activeOptions.SpeedMode,
+                    "fast", StringComparison.OrdinalIgnoreCase) ? "探测完成" : "等待下载";
+            }
+            else if (string.Equals(progress.stage, "download_started", StringComparison.Ordinal))
+            {
+                node.DownloadStarted = true;
+                node.State = "下载中";
+                displayedDownloadingNode = node.Name;
+            }
+            SetNodeStatusCell(row, node);
+            UpdateStatistics();
         }
 
         private void UpdateNodeRowCore(NodeResultEvent result)
@@ -4044,17 +4168,15 @@ namespace ClashSpeedTestGUI
                 SetRowValue(row, currentHeaders[i], values[i]);
             int nameIndex = currentHeaders.IndexOf("节点名称");
             int typeIndex = currentHeaders.IndexOf("类型");
-            int latencyIndex = currentHeaders.IndexOf("延迟");
+            int latencyIndex = currentHeaders.IndexOf("HTTP 延迟");
             if (nameIndex >= 0) node.Name = values[nameIndex];
             if (typeIndex >= 0) node.Type = values[typeIndex];
             int downloadIndex = currentHeaders.IndexOf("下载速度");
-            int uploadIndex = currentHeaders.IndexOf("上传速度");
             NodeResultProjection.Apply(node, result);
-            SetRowValue(row, "延迟", node.LatencyMs > 0 ? values[latencyIndex] : "未测试");
+            SetRowValue(row, "HTTP 延迟", node.LatencyMs > 0 ? values[latencyIndex] : "未测试");
             SetTransferCell(row, "下载速度", node.DownloadTested, node.DownloadComplete,
                 downloadIndex >= 0 && node.DownloadMbps > 0 ? values[downloadIndex] : null);
-            SetTransferCell(row, "上传速度", node.UploadTested, node.UploadComplete,
-                uploadIndex >= 0 && node.UploadMbps > 0 ? values[uploadIndex] : null);
+            if (node.DownloadStarted) displayedDownloadingNode = "";
             SetRegionCell(row, node);
             SetNodeStatusCell(row, node);
             ApplyRowStateStyle(row, node.State == "有效");
@@ -4124,8 +4246,8 @@ namespace ClashSpeedTestGUI
                 row.Cells[column.Index].Value = NodeListPresentation.StatusText(node);
                 List<string> incomplete = new List<string>();
                 if (node.DownloadTested && !node.DownloadComplete) incomplete.Add("下载");
-                if (node.UploadTested && !node.UploadComplete) incomplete.Add("上传");
-                row.Cells[column.Index].ToolTipText = incomplete.Count == 0 ? node.State ?? ""
+                row.Cells[column.Index].ToolTipText = incomplete.Count == 0
+                    ? (!string.IsNullOrWhiteSpace(node.StatusDetail) ? node.StatusDetail : node.State ?? "")
                     : string.Join("、", incomplete.ToArray())
                         + "传输未完成；内核会标记为不可用（usable=false），节点不会导出。";
                 return;
@@ -4136,16 +4258,12 @@ namespace ClashSpeedTestGUI
         {
             if (string.Equals(mode, "fast", StringComparison.OrdinalIgnoreCase))
             {
-                return new List<string> { "序号", "节点名称", "类型", "延迟" };
+                return new List<string> { "序号", "节点名称", "类型", "HTTP 延迟" };
             }
             List<string> headers = new List<string>
             {
-                "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度"
+                "序号", "节点名称", "类型", "HTTP 延迟", "抖动", "HTTP 探测失败率", "下载速度"
             };
-            if (string.Equals(mode, "full", StringComparison.OrdinalIgnoreCase))
-            {
-                headers.Add("上传速度");
-            }
             return headers;
         }
 
@@ -4222,15 +4340,6 @@ namespace ClashSpeedTestGUI
             {
                 throw new InvalidOperationException("测速地址必须是 http:// 或 https:// 地址。");
             }
-            if (string.Equals(options.SpeedMode, "full", StringComparison.OrdinalIgnoreCase)
-                && !ServerUrlPolicy.SupportsUpload(options.ServerUrl))
-            {
-                throw new InvalidOperationException(
-                    "深度模式需要支持上传的测速服务地址。\n\n"
-                    + "当前地址是直接下载文件或带查询参数的地址，只能用于下载测速。"
-                    + "请改用不带路径和查询参数、支持 /__down 与 /__up 的测速服务地址。");
-            }
-
             OutputPathPolicy.EnsureSafe(options.OutputPath, localInputPaths, new[]
             {
                 Application.ExecutablePath,
@@ -4273,6 +4382,129 @@ namespace ClashSpeedTestGUI
             }
             catch
             {
+            }
+        }
+
+        private async Task<NodeManagementResult> ApplyAutomaticExitRegionRenameAsync(
+            NodeManagementResult authoritativeOutput, RunOptions options, TaskOperation operation)
+        {
+            NodeManifestEvent[] exported = authoritativeOutput == null
+                ? null : authoritativeOutput.nodes;
+            List<NodeSnapshot> targets = (exported ?? new NodeManifestEvent[0])
+                .Select(delegate(NodeManifestEvent item)
+                {
+                    NodeSnapshot node;
+                    return item != null && nodesById.TryGetValue(item.id, out node) ? node : null;
+                })
+                .Where(delegate(NodeSnapshot node)
+                {
+                    return node != null && node.Exported
+                        && string.Equals(node.State, "有效", StringComparison.Ordinal);
+                })
+                .ToList();
+            if (targets.Count == 0) return authoritativeOutput;
+
+            string requestPath = Path.Combine(Path.GetTempPath(),
+                "ClashSpeedTestGUI-auto-region-" + Guid.NewGuid().ToString("N") + ".json");
+            string[] targetIds = targets.Select(delegate(NodeSnapshot node) { return node.Id; }).ToArray();
+            Dictionary<string, NodeRegionSnapshot> snapshots = targets.ToDictionary(
+                delegate(NodeSnapshot node) { return node.Id; },
+                delegate(NodeSnapshot node) { return NodeRegionSnapshot.Capture(node); },
+                StringComparer.Ordinal);
+            try
+            {
+                File.WriteAllText(requestPath, nodeSerializer.Serialize(new NodeRegionRequest
+                {
+                    ids = targetIds
+                }), new UTF8Encoding(false));
+                regionQueryTotal = targets.Count;
+                regionQueryCompleted = 0;
+                regionQuerySuccess = 0;
+                regionQueryFailed = 0;
+                regionQueryPendingIds.Clear();
+                foreach (NodeSnapshot node in targets)
+                {
+                    regionQueryPendingIds.Add(node.Id);
+                    node.RegionState = "查询中";
+                    node.RegionError = "";
+                    DataGridViewRow row;
+                    if (nodeRows.TryGetValue(node.Id, out row)) SetRegionCell(row, node);
+                }
+                SetStatus("测速完成，正在查询有效节点的真实出口地区：0/" + targets.Count);
+
+                RunResult regionResult;
+                try
+                {
+                    regionResult = await Task.Run(delegate
+                    {
+                        return RunRegionCore(options.CoreOutputPath, requestPath, targetIds, operation);
+                    }, operation.Token);
+                    operation.Token.ThrowIfCancellationRequested();
+                    if (regionResult.ExitCode != 0)
+                    {
+                        throw new InvalidOperationException(string.IsNullOrWhiteSpace(regionResult.ErrorText)
+                            ? "地区查询器退出代码：" + regionResult.ExitCode : regionResult.ErrorText);
+                    }
+                    ApplyRegionBatch(regionResult.RegionEvents, targetIds);
+                }
+                catch (OperationCanceledException)
+                {
+                    RestoreRegionSnapshots(snapshots);
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    RestoreRegionSnapshots(snapshots);
+                    MessageBox.Show(this,
+                        "真实出口地区批次未通过完整性校验，本次不执行任何自动重命名。\n\n"
+                        + "节点将按原名称保存。原因：" + ex.Message,
+                        "自动重命名已跳过", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    SetStatus("真实出口地区批次失败；将保存原节点名称");
+                    return authoritativeOutput;
+                }
+
+                regionQueryCompleted = regionResult.RegionEvents.Count;
+                regionQuerySuccess = regionResult.RegionEvents.Count(delegate(NodeRegionEvent value)
+                {
+                    return value.success;
+                });
+                regionQueryFailed = regionQueryCompleted - regionQuerySuccess;
+                regionQueryPendingIds.Clear();
+                string presentationWarning = "";
+                try
+                {
+                    RebuildRegionFilterOptions();
+                    if (userSelectedSort) ApplyActiveUserSort();
+                }
+                catch (Exception presentationError)
+                {
+                    userSelectedSort = false;
+                    activeSortHeader = "";
+                    ResetRegionFilterOptions();
+                    presentationWarning = "；列表显示已重置：" + presentationError.Message;
+                }
+
+                Dictionary<string, string> renames = LabelFormatter.BuildRealExitRenameMap(
+                    exported, nodesById);
+                if (renames.Count == 0)
+                {
+                    if (presentationWarning.Length > 0) SetStatus("出口地区查询完成" + presentationWarning);
+                    return authoritativeOutput;
+                }
+                NodeManagementRequest request = new NodeManagementRequest
+                {
+                    renames = renames,
+                    deletes = new string[0]
+                };
+                return await Task.Run(delegate
+                {
+                    return RunNodeManagement(options.CoreOutputPath, request, operation.Token);
+                }, operation.Token);
+            }
+            finally
+            {
+                regionQueryPendingIds.Clear();
+                CleanupTempFile(requestPath);
             }
         }
 
@@ -4660,12 +4892,11 @@ namespace ClashSpeedTestGUI
                 SetNumber(latencyNumber, preset.MaxLatencyMs);
                 SetNumber(downloadSpeedNumber, preset.MinDownloadSpeed);
                 SetNumber(downloadSizeNumber, preset.DownloadSizeMb);
-                SetNumber(uploadSizeNumber, preset.UploadSizeMb);
+                SetNumber(probeTimeoutNumber, preset.ProbeTimeoutSeconds);
                 SetNumber(timeoutNumber, preset.TimeoutSeconds);
                 SetNumber(concurrentNumber, preset.NodeConcurrent);
                 SetNumber(transferConcurrentNumber, preset.TransferConcurrent);
-                SetNumber(packetLossNumber, preset.MaxPacketLoss);
-                SetNumber(uploadSpeedNumber, preset.MinUploadSpeed);
+                SetNumber(probeFailureNumber, preset.MaxHTTPProbeFailure);
                 UpdateModeControlState();
             }
             finally
@@ -4708,12 +4939,11 @@ namespace ClashSpeedTestGUI
                 && latencyNumber.Value == preset.MaxLatencyMs
                 && downloadSpeedNumber.Value == preset.MinDownloadSpeed
                 && downloadSizeNumber.Value == preset.DownloadSizeMb
-                && uploadSizeNumber.Value == preset.UploadSizeMb
+                && probeTimeoutNumber.Value == preset.ProbeTimeoutSeconds
                 && timeoutNumber.Value == preset.TimeoutSeconds
                 && concurrentNumber.Value == preset.NodeConcurrent
                 && transferConcurrentNumber.Value == preset.TransferConcurrent
-                && packetLossNumber.Value == preset.MaxPacketLoss
-                && uploadSpeedNumber.Value == preset.MinUploadSpeed;
+                && probeFailureNumber.Value == preset.MaxHTTPProbeFailure;
         }
 
         private void MarkPresetCustom()
@@ -4807,10 +5037,8 @@ namespace ClashSpeedTestGUI
         {
             bool editable = activeOperation == null && !managementInProgress;
             string mode = Convert.ToString(modeCombo.SelectedItem, CultureInfo.InvariantCulture);
-            bool full = string.Equals(mode, "full", StringComparison.OrdinalIgnoreCase);
             bool fast = string.Equals(mode, "fast", StringComparison.OrdinalIgnoreCase);
-            uploadSizeNumber.Enabled = editable && full;
-            uploadSpeedNumber.Enabled = editable && full;
+            probeTimeoutNumber.Enabled = editable;
             downloadSizeNumber.Enabled = editable && !fast;
             downloadSpeedNumber.Enabled = editable && !fast;
             transferConcurrentNumber.Enabled = editable && !fast;
@@ -5175,21 +5403,6 @@ namespace ClashSpeedTestGUI
         }
     }
 
-    internal static class ServerUrlPolicy
-    {
-        public static bool SupportsUpload(string value)
-        {
-            Uri uri;
-            if (!Uri.TryCreate((value ?? "").Trim(), UriKind.Absolute, out uri)) return false;
-            if (!string.Equals(uri.Scheme, Uri.UriSchemeHttp, StringComparison.OrdinalIgnoreCase)
-                && !string.Equals(uri.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            bool hasPath = !string.IsNullOrWhiteSpace((uri.AbsolutePath ?? "").Trim('/'));
-            return !hasPath && string.IsNullOrEmpty(uri.Query) && string.IsNullOrEmpty(uri.Fragment);
-        }
-    }
-
     internal static class OutputPathPolicy
     {
         public static void EnsureSafe(string outputPath, IEnumerable<string> localInputPaths,
@@ -5268,9 +5481,6 @@ namespace ClashSpeedTestGUI
 
     internal static class LabelFormatter
     {
-        private static readonly Regex Placeholder =
-            new Regex(@"^__CSTGUI__(?<code>[A-Z]{2})__(?<index>\d{3})$", RegexOptions.Compiled);
-
         private static readonly Dictionary<string, string> CountryNames =
             new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
             {
@@ -5293,36 +5503,50 @@ namespace ClashSpeedTestGUI
                 {"NZ","新西兰"},{"MO","澳门"}
             };
 
-        public static Dictionary<string, string> BuildRenameMap(
-            IEnumerable<NodeManifestEvent> nodes)
+        public static Dictionary<string, string> BuildRealExitRenameMap(
+            IEnumerable<NodeManifestEvent> nodes, IDictionary<string, NodeSnapshot> snapshots)
         {
             Dictionary<string, string> renames =
                 new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (NodeManifestEvent node in nodes ?? Enumerable.Empty<NodeManifestEvent>())
+            List<NodeManifestEvent> ordered = (nodes ?? Enumerable.Empty<NodeManifestEvent>())
+                .Where(delegate(NodeManifestEvent node)
+                {
+                    return node != null && !string.IsNullOrWhiteSpace(node.id);
+                }).ToList();
+            HashSet<string> reserved = new HashSet<string>(ordered.Select(
+                delegate(NodeManifestEvent node) { return node.name ?? ""; }), StringComparer.Ordinal);
+            Dictionary<string, int> counters = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (NodeManifestEvent node in ordered)
             {
-                if (node == null || string.IsNullOrWhiteSpace(node.id)) continue;
-                string formatted = FormatNodeName(node.name);
-                if (!string.Equals(formatted, node.name, StringComparison.Ordinal))
-                    renames.Add(node.id, formatted);
+                NodeSnapshot snapshot;
+                if (snapshots == null || !snapshots.TryGetValue(node.id, out snapshot)
+                    || snapshot == null
+                    || !string.Equals(snapshot.RegionState, "成功", StringComparison.Ordinal)) continue;
+                string code = (snapshot.RegionCountryCode ?? "").Trim().ToUpperInvariant();
+                if (!Regex.IsMatch(code, @"\A[A-Z]{2}\z")) continue;
+                reserved.Remove(node.name ?? "");
+                int index;
+                counters.TryGetValue(code, out index);
+                string countryName;
+                if (!CountryNames.TryGetValue(code, out countryName))
+                    countryName = string.IsNullOrWhiteSpace(snapshot.RegionCountry)
+                        ? code : snapshot.RegionCountry.Trim();
+                string flag = string.IsNullOrWhiteSpace(snapshot.RegionEmoji)
+                    ? CountryFlag(code) : snapshot.RegionEmoji.Trim();
+                string formatted;
+                do
+                {
+                    index++;
+                    formatted = string.Format(CultureInfo.InvariantCulture, "{0} {1} {2}-{3}",
+                        flag, countryName, code, index.ToString("D2", CultureInfo.InvariantCulture));
+                }
+                while (reserved.Contains(formatted));
+                counters[code] = index;
+                reserved.Add(formatted);
+                if (!string.Equals(formatted, node.name, StringComparison.Ordinal)) renames[node.id] = formatted;
             }
             return renames;
-        }
-
-        public static string FormatNodeName(string name)
-        {
-            string original = name ?? "";
-            Match match = Placeholder.Match(original);
-            if (!match.Success) return original;
-            string code = match.Groups["code"].Value.ToUpperInvariant();
-            int index;
-            int.TryParse(match.Groups["index"].Value, NumberStyles.Integer,
-                CultureInfo.InvariantCulture, out index);
-            string countryName;
-            bool known = CountryNames.TryGetValue(code, out countryName);
-            if (!known) countryName = "未知";
-            string flag = known ? CountryFlag(code) : "\uD83C\uDFF3\uFE0F";
-            return string.Format(CultureInfo.InvariantCulture, "{0} {1} {2}-{3}",
-                flag, countryName, code, index.ToString("D2", CultureInfo.InvariantCulture));
         }
 
         private static string CountryFlag(string countryCode)
@@ -5621,28 +5845,47 @@ namespace ClashSpeedTestGUI
         {
             try
             {
-                Assert(LabelFormatter.FormatNodeName("__CSTGUI__HK__001")
-                    == "🇭🇰 香港 HK-01", "香港重命名");
-                Assert(LabelFormatter.FormatNodeName("__CSTGUI__ZZ__100")
-                    == "🏳️ 未知 ZZ-100", "未知地区重命名");
-                Assert(LabelFormatter.FormatNodeName("prefix __CSTGUI__HK__001")
-                    == "prefix __CSTGUI__HK__001", "只处理完整的受控名称占位符");
                 NodeManifestEvent renameFixture = new NodeManifestEvent
                 {
                     id = "stable-id",
-                    name = "__CSTGUI__HK__001",
+                    name = "original",
                     config = new Dictionary<string, object>
                     {
-                        { "name", "__CSTGUI__HK__001" },
-                        { "password", "secret-__CSTGUI__HK__001" }
+                        { "name", "original" },
+                        { "server", "us-entry.example.com" },
+                        { "password", "secret" }
                     }
                 };
+                NodeManifestEvent failedRenameFixture = new NodeManifestEvent
+                {
+                    id = "failed-id",
+                    name = "keep-original",
+                    config = new Dictionary<string, object> { { "name", "keep-original" } }
+                };
                 Dictionary<string, string> renameMap =
-                    LabelFormatter.BuildRenameMap(new[] { renameFixture });
+                    LabelFormatter.BuildRealExitRenameMap(
+                        new[] { renameFixture, failedRenameFixture },
+                        new Dictionary<string, NodeSnapshot>
+                        {
+                            { "stable-id", new NodeSnapshot
+                                {
+                                    Id = "stable-id", RegionState = "成功",
+                                    RegionCountryCode = "HK", RegionCountry = "Hong Kong",
+                                    RegionEmoji = "🇭🇰"
+                                }
+                            },
+                            { "failed-id", new NodeSnapshot
+                                {
+                                    Id = "failed-id", RegionState = "查询失败",
+                                    RegionCountryCode = "US", RegionCountry = "美国"
+                                }
+                            }
+                        });
                 Assert(renameMap.Count == 1 && renameMap["stable-id"] == "🇭🇰 香港 HK-01"
+                    && !renameMap.ContainsKey("failed-id")
                     && Convert.ToString(renameFixture.config["password"], CultureInfo.InvariantCulture)
-                        == "secret-__CSTGUI__HK__001",
-                    "重命名请求只携带稳定 ID 和新 name，不改凭据字段");
+                        == "secret",
+                    "真实出口地区覆盖入口地址，单节点失败保留原名且不改凭据字段");
                 Assert(GistClient.TryExtractUsername("https://gist.github.com/user/abc123") == "user",
                     "旧版 Gist 地址迁移用户名");
                 TestGistSelection();
@@ -5672,14 +5915,6 @@ namespace ClashSpeedTestGUI
                     "C:\\configs\\work,travel.yaml\r\nC:\\configs\\backup.yaml");
                 Assert(commaPath.Count == 2 && commaPath[0].EndsWith("work,travel.yaml"),
                     "Windows 文件名中的逗号原样保留，每行一个输入");
-                Assert(ServerUrlPolicy.SupportsUpload("https://speed.example.com"),
-                    "无路径测速服务支持上传");
-                Assert(ServerUrlPolicy.SupportsUpload("https://speed.example.com/"),
-                    "根路径测速服务支持上传");
-                Assert(!ServerUrlPolicy.SupportsUpload("https://speed.example.com/file.bin"),
-                    "直接下载地址不支持上传");
-                Assert(!ServerUrlPolicy.SupportsUpload("https://speed.example.com?token=x"),
-                    "带查询参数地址不支持上传");
                 TestOutputPathPolicy();
                 Assert(!OutputPolicy.ShouldCommit(10, 0), "空结果不覆盖输出");
                 Assert(OutputPolicy.ShouldCommit(10, 1), "有效结果允许写入");
@@ -5688,7 +5923,7 @@ namespace ClashSpeedTestGUI
                 TestTaskOperationAndBatchQueue();
                 TestChildProcessCancellation();
                 TestRunnerProtocolValidation();
-                TestV4ResultProjection();
+                TestV5ResultProjection();
                 TestRegionProtocolValidation();
                 TestRegionProtocolProcessBoundaries();
                 TestNodeFeatures();
@@ -5699,12 +5934,11 @@ namespace ClashSpeedTestGUI
                 Assert(defaults.MinDownloadSpeed == 3 && defaults.SpeedMode == balanced.Mode
                     && defaults.MaxLatencyMs == balanced.MaxLatencyMs
                     && defaults.DownloadSizeMb == balanced.DownloadSizeMb
-                    && defaults.UploadSizeMb == balanced.UploadSizeMb
+                    && defaults.ProbeTimeoutSeconds == balanced.ProbeTimeoutSeconds
                     && defaults.TimeoutSeconds == balanced.TimeoutSeconds
                     && defaults.Concurrent == balanced.NodeConcurrent
                     && defaults.TransferConcurrent == balanced.TransferConcurrent
-                    && defaults.MaxPacketLoss == balanced.MaxPacketLoss
-                    && defaults.MinUploadSpeed == balanced.MinUploadSpeed,
+                    && defaults.MaxHTTPProbeFailure == balanced.MaxHTTPProbeFailure,
                     "新安装默认参数匹配均衡（推荐）方案");
                 TestSettingsStoreOverride();
                 TestAtomicFileCommit();
@@ -6097,7 +6331,7 @@ namespace ClashSpeedTestGUI
 
         private static void TestRunnerProtocolValidation()
         {
-            string[] headers = { "序号", "节点名称", "类型", "延迟" };
+            string[] headers = { "序号", "节点名称", "类型", "HTTP 延迟" };
             NodeManifestEvent node = new NodeManifestEvent
             {
                 id = "stable-id",
@@ -6118,25 +6352,36 @@ namespace ClashSpeedTestGUI
             };
 
             RunnerProtocolValidator valid = new RunnerProtocolValidator(headers);
-            valid.AcceptProtocol(4);
+            valid.AcceptProtocol(5);
             valid.AcceptHeader(headers);
             valid.AcceptNodeCount(1);
             valid.AcceptNode(node);
             valid.AcceptLegacyNodeMirror("node-a", "ss");
+            valid.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
             valid.AcceptResult(result);
             valid.AcceptLegacyResultMirror(result.cells);
             valid.ValidateCompletion();
-            Assert(valid.IsComplete && valid.ResultCount == 1, "完整 v4 协议通过");
+            Assert(valid.IsComplete && valid.ResultCount == 1, "完整 v5 协议通过");
             JavaScriptSerializer protocolSerializer = new JavaScriptSerializer();
             string resultJson = protocolSerializer.Serialize(result);
             RunnerProtocolValidator.ValidateResultEnvelope(
                 protocolSerializer.DeserializeObject(resultJson) as Dictionary<string, object>);
+            RunnerProtocolValidator.ValidateProgressEnvelope(
+                protocolSerializer.DeserializeObject("{\"id\":\"stable-id\",\"stage\":\"probe_completed\"}")
+                    as Dictionary<string, object>);
             NodeResultEvent resultRoundTrip =
                 protocolSerializer.Deserialize<NodeResultEvent>(resultJson);
             Assert(resultRoundTrip.usable == true
                 && resultRoundTrip.metrics.latency_nanoseconds == 20000000,
-                "v4 结果 JSON 固定结构可完整回读");
+                "v5 结果 JSON 固定结构可完整回读");
 
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator.ValidateProgressEnvelope(
+                    protocolSerializer.DeserializeObject(
+                        "{\"id\":\"stable-id\",\"stage\":\"probe_completed\",\"extra\":true}")
+                        as Dictionary<string, object>);
+            }, "拒绝 v5 进度事件中的未知字段");
             AssertInvalidOperation(delegate
             {
                 new RunnerProtocolValidator(headers).AcceptProtocol(3);
@@ -6144,13 +6389,13 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator wrongHeader = new RunnerProtocolValidator(headers);
-                wrongHeader.AcceptProtocol(4);
+                wrongHeader.AcceptProtocol(5);
                 wrongHeader.AcceptHeader(new[] { "序号", "节点名称", "类型", "下载速度" });
             }, "拒绝不匹配表头");
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator incomplete = new RunnerProtocolValidator(headers);
-                incomplete.AcceptProtocol(4);
+                incomplete.AcceptProtocol(5);
                 incomplete.AcceptHeader(headers);
                 incomplete.AcceptNodeCount(1);
                 incomplete.AcceptNode(node);
@@ -6159,7 +6404,7 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator duplicate = new RunnerProtocolValidator(headers);
-                duplicate.AcceptProtocol(4);
+                duplicate.AcceptProtocol(5);
                 duplicate.AcceptHeader(headers);
                 duplicate.AcceptNodeCount(1);
                 duplicate.AcceptNode(node);
@@ -6168,7 +6413,7 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator unknown = new RunnerProtocolValidator(headers);
-                unknown.AcceptProtocol(4);
+                unknown.AcceptProtocol(5);
                 unknown.AcceptHeader(headers);
                 unknown.AcceptNodeCount(1);
                 unknown.AcceptNode(node);
@@ -6182,8 +6427,84 @@ namespace ClashSpeedTestGUI
             }, "拒绝未知结果 ID");
             AssertInvalidOperation(delegate
             {
+                RunnerProtocolValidator unknownProgress = new RunnerProtocolValidator(headers);
+                unknownProgress.AcceptProtocol(5);
+                unknownProgress.AcceptHeader(headers);
+                unknownProgress.AcceptNodeCount(1);
+                unknownProgress.AcceptNode(node);
+                unknownProgress.AcceptProgress(
+                    new NodeProgressEvent { id = "missing", stage = "probe_completed" });
+            }, "拒绝未知进度 ID");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator duplicateProgress = new RunnerProtocolValidator(headers);
+                duplicateProgress.AcceptProtocol(5);
+                duplicateProgress.AcceptHeader(headers);
+                duplicateProgress.AcceptNodeCount(1);
+                duplicateProgress.AcceptNode(node);
+                duplicateProgress.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                duplicateProgress.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+            }, "拒绝重复 probe_completed");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator unknownStage = new RunnerProtocolValidator(headers);
+                unknownStage.AcceptProtocol(5);
+                unknownStage.AcceptHeader(headers);
+                unknownStage.AcceptNodeCount(1);
+                unknownStage.AcceptNode(node);
+                unknownStage.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "other" });
+            }, "拒绝未知进度阶段");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator fastDownload = new RunnerProtocolValidator(headers);
+                fastDownload.AcceptProtocol(5);
+                fastDownload.AcceptHeader(headers);
+                fastDownload.AcceptNodeCount(1);
+                fastDownload.AcceptNode(node);
+                fastDownload.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                fastDownload.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "download_started" });
+            }, "拒绝快速模式 download_started");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator earlyResult = new RunnerProtocolValidator(headers);
+                earlyResult.AcceptProtocol(5);
+                earlyResult.AcceptHeader(headers);
+                earlyResult.AcceptNodeCount(1);
+                earlyResult.AcceptNode(node);
+                earlyResult.AcceptResult(result);
+            }, "拒绝 probe_completed 之前的最终结果");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator halfOutput = new RunnerProtocolValidator(headers);
+                halfOutput.AcceptProtocol(5);
+                halfOutput.AcceptHeader(headers);
+                halfOutput.AcceptNodeCount(1);
+                halfOutput.AcceptNode(node);
+                halfOutput.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                halfOutput.ValidateCompletion();
+            }, "拒绝半截协议输出");
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator duplicateResult = new RunnerProtocolValidator(headers);
+                duplicateResult.AcceptProtocol(5);
+                duplicateResult.AcceptHeader(headers);
+                duplicateResult.AcceptNodeCount(1);
+                duplicateResult.AcceptNode(node);
+                duplicateResult.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                duplicateResult.AcceptResult(result);
+                duplicateResult.AcceptResult(result);
+            }, "拒绝重复最终结果");
+            AssertInvalidOperation(delegate
+            {
                 RunnerProtocolValidator mirror = new RunnerProtocolValidator(headers);
-                mirror.AcceptProtocol(4);
+                mirror.AcceptProtocol(5);
                 mirror.AcceptHeader(headers);
                 mirror.AcceptNodeCount(1);
                 mirror.AcceptNode(node);
@@ -6192,10 +6513,11 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator mirror = new RunnerProtocolValidator(headers);
-                mirror.AcceptProtocol(4);
+                mirror.AcceptProtocol(5);
                 mirror.AcceptHeader(headers);
                 mirror.AcceptNodeCount(1);
                 mirror.AcceptNode(node);
+                mirror.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
                 mirror.AcceptResult(result);
                 mirror.AcceptLegacyResultMirror(result.cells);
                 mirror.AcceptLegacyResultMirror(result.cells);
@@ -6203,7 +6525,7 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator invalidConfig = new RunnerProtocolValidator(headers);
-                invalidConfig.AcceptProtocol(4);
+                invalidConfig.AcceptProtocol(5);
                 invalidConfig.AcceptHeader(headers);
                 invalidConfig.AcceptNodeCount(1);
                 invalidConfig.AcceptNode(new NodeManifestEvent
@@ -6217,10 +6539,12 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator nullCell = new RunnerProtocolValidator(headers);
-                nullCell.AcceptProtocol(4);
+                nullCell.AcceptProtocol(5);
                 nullCell.AcceptHeader(headers);
                 nullCell.AcceptNodeCount(1);
                 nullCell.AcceptNode(node);
+                nullCell.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
                 nullCell.AcceptResult(new NodeResultEvent
                 {
                     id = "stable-id",
@@ -6232,17 +6556,19 @@ namespace ClashSpeedTestGUI
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator missingMetrics = new RunnerProtocolValidator(headers);
-                missingMetrics.AcceptProtocol(4);
+                missingMetrics.AcceptProtocol(5);
                 missingMetrics.AcceptHeader(headers);
                 missingMetrics.AcceptNodeCount(1);
                 missingMetrics.AcceptNode(node);
+                missingMetrics.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
                 missingMetrics.AcceptResult(new NodeResultEvent
                 {
                     id = "stable-id",
                     cells = new[] { "1.", "node-a", "ss", "20ms" },
                     usable = true
                 });
-            }, "拒绝缺少原始指标的 v4 结果");
+            }, "拒绝缺少原始指标的 v5 结果");
             AssertInvalidOperation(delegate
             {
                 Dictionary<string, object> envelope = new Dictionary<string, object>
@@ -6254,35 +6580,34 @@ namespace ClashSpeedTestGUI
                         {
                             { "latency_nanoseconds", 1 },
                             { "jitter_nanoseconds", 0 },
-                            { "packet_loss_percent", 0 },
+                            { "http_probe_failure_percent", 0 },
                             { "download_bytes_per_second", 0 },
-                            { "upload_bytes_per_second", 0 },
                             { "download_tested", false },
-                            { "upload_tested", false },
-                            { "download_complete", false },
-                            { "upload_complete", false }
+                            { "download_complete", false }
                         }
                     },
                     { "unknown", true }
                 };
                 RunnerProtocolValidator.ValidateResultEnvelope(envelope);
-            }, "拒绝 v4 结果中的未知字段");
+            }, "拒绝 v5 结果中的未知字段");
             AssertInvalidOperation(delegate
             {
                 Dictionary<string, object> wrongType =
                     protocolSerializer.DeserializeObject(resultJson) as Dictionary<string, object>;
                 wrongType["usable"] = "true";
                 RunnerProtocolValidator.ValidateResultEnvelope(wrongType);
-            }, "拒绝 v4 结果中可自动转换但类型错误的字段");
+            }, "拒绝 v5 结果中可自动转换但类型错误的字段");
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator invalidMetrics = new RunnerProtocolValidator(headers);
-                invalidMetrics.AcceptProtocol(4);
+                invalidMetrics.AcceptProtocol(5);
                 invalidMetrics.AcceptHeader(headers);
                 invalidMetrics.AcceptNodeCount(1);
                 invalidMetrics.AcceptNode(node);
+                invalidMetrics.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
                 NodeResultMetricsEvent metrics = CreateFastResultMetrics();
-                metrics.packet_loss_percent = 101;
+                metrics.http_probe_failure_percent = 101;
                 invalidMetrics.AcceptResult(new NodeResultEvent
                 {
                     id = "stable-id",
@@ -6290,11 +6615,11 @@ namespace ClashSpeedTestGUI
                     usable = false,
                     metrics = metrics
                 });
-            }, "拒绝越界的 v4 原始指标");
+            }, "拒绝越界的 v5 原始指标");
 
             string[] downloadHeaders =
             {
-                "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度"
+                "序号", "节点名称", "类型", "HTTP 延迟", "抖动", "HTTP 探测失败率", "下载速度"
             };
             NodeResultEvent partialResult = new NodeResultEvent
             {
@@ -6304,35 +6629,52 @@ namespace ClashSpeedTestGUI
                 metrics = CreatePartialDownloadMetrics()
             };
             RunnerProtocolValidator partial = new RunnerProtocolValidator(downloadHeaders);
-            partial.AcceptProtocol(4);
+            partial.AcceptProtocol(5);
             partial.AcceptHeader(downloadHeaders);
             partial.AcceptNodeCount(1);
             partial.AcceptNode(node);
+            partial.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+            partial.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "download_started" });
             partial.AcceptResult(partialResult);
             partial.ValidateCompletion();
-            Assert(partial.IsComplete, "v4 允许显示已启动但未完成的部分传输速度");
+            Assert(partial.IsComplete, "v5 允许显示已启动但未完成的部分传输速度");
+
+            AssertInvalidOperation(delegate
+            {
+                RunnerProtocolValidator outOfOrder = new RunnerProtocolValidator(downloadHeaders);
+                outOfOrder.AcceptProtocol(5);
+                outOfOrder.AcceptHeader(downloadHeaders);
+                outOfOrder.AcceptNodeCount(1);
+                outOfOrder.AcceptNode(node);
+                outOfOrder.AcceptProgress(
+                    new NodeProgressEvent { id = "stable-id", stage = "download_started" });
+            }, "拒绝 probe_completed 之前的 download_started");
 
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator unusableCompletion =
                     new RunnerProtocolValidator(downloadHeaders);
-                unusableCompletion.AcceptProtocol(4);
+                unusableCompletion.AcceptProtocol(5);
                 unusableCompletion.AcceptHeader(downloadHeaders);
                 unusableCompletion.AcceptNodeCount(1);
                 unusableCompletion.AcceptNode(node);
+                unusableCompletion.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                unusableCompletion.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "download_started" });
                 partialResult.usable = true;
                 try { unusableCompletion.AcceptResult(partialResult); }
                 finally { partialResult.usable = false; }
-            }, "v4 未完成计划传输的节点不能标记 usable");
+            }, "v5 未完成计划传输的节点不能标记 usable");
 
             AssertInvalidOperation(delegate
             {
                 RunnerProtocolValidator impossibleCompletion =
                     new RunnerProtocolValidator(downloadHeaders);
-                impossibleCompletion.AcceptProtocol(4);
+                impossibleCompletion.AcceptProtocol(5);
                 impossibleCompletion.AcceptHeader(downloadHeaders);
                 impossibleCompletion.AcceptNodeCount(1);
                 impossibleCompletion.AcceptNode(node);
+                impossibleCompletion.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "probe_completed" });
+                impossibleCompletion.AcceptProgress(new NodeProgressEvent { id = "stable-id", stage = "download_started" });
                 NodeResultMetricsEvent metrics = CreatePartialDownloadMetrics();
                 metrics.download_tested = false;
                 metrics.download_complete = true;
@@ -6344,7 +6686,7 @@ namespace ClashSpeedTestGUI
                     usable = false,
                     metrics = metrics
                 });
-            }, "v4 complete 不能在 tested 之前成立");
+            }, "v5 complete 不能在 tested 之前成立");
         }
 
         private static NodeResultMetricsEvent CreateFastResultMetrics()
@@ -6353,13 +6695,10 @@ namespace ClashSpeedTestGUI
             {
                 latency_nanoseconds = 20000000,
                 jitter_nanoseconds = 1000000,
-                packet_loss_percent = 0,
+                http_probe_failure_percent = 0,
                 download_bytes_per_second = 0,
-                upload_bytes_per_second = 0,
                 download_tested = false,
-                upload_tested = false,
-                download_complete = false,
-                upload_complete = false
+                download_complete = false
             };
         }
 
@@ -6369,17 +6708,14 @@ namespace ClashSpeedTestGUI
             {
                 latency_nanoseconds = 20000000,
                 jitter_nanoseconds = 1000000,
-                packet_loss_percent = 0,
+                http_probe_failure_percent = 0,
                 download_bytes_per_second = 2D * 1024D * 1024D,
-                upload_bytes_per_second = 0,
                 download_tested = true,
-                upload_tested = false,
-                download_complete = false,
-                upload_complete = false
+                download_complete = false
             };
         }
 
-        private static void TestV4ResultProjection()
+        private static void TestV5ResultProjection()
         {
             NodeSnapshot node = new NodeSnapshot();
             NodeResultEvent boundary = new NodeResultEvent
@@ -6394,19 +6730,16 @@ namespace ClashSpeedTestGUI
                 {
                     latency_nanoseconds = 1000900000,
                     jitter_nanoseconds = 0,
-                    packet_loss_percent = 0,
+                    http_probe_failure_percent = 0,
                     download_bytes_per_second = 5D * 1024D * 1024D - 1D,
-                    upload_bytes_per_second = 0,
                     download_tested = true,
-                    upload_tested = false,
-                    download_complete = true,
-                    upload_complete = false
+                    download_complete = true
                 }
             };
             NodeResultProjection.Apply(node, boundary);
             Assert(node.State == "失败" && Math.Abs(node.LatencyMs - 1000.9D) < 0.0001D
                 && node.DownloadMbps < 5D && node.DownloadTested && node.DownloadComplete,
-                "v4 投影分开 usable、tested 和 complete，不从格式化 cells 推断");
+                "v5 投影分开 usable、tested 和 complete，不从格式化 cells 推断");
         }
 
         private static void TestRegionProtocolValidation()
@@ -6600,8 +6933,8 @@ namespace ClashSpeedTestGUI
         {
             Assert(NodeListPresentation.Headers.SequenceEqual(new[]
             {
-                "序号", "节点名称", "类型", "延迟", "下载速度", "上传速度", "出口地区", "状态"
-            }), "固定八列");
+                "序号", "节点名称", "类型", "HTTP 延迟", "下载速度", "出口地区", "状态"
+            }), "固定七列");
             Assert(NodeListPresentation.MetricText(false, "12MB/s") == "未测试", "未测试占位值");
             Assert(NodeListPresentation.TransferMetricText(true, false, "2.00 MB/s")
                 == "2.00 MB/s", "未完成传输仍显示已传输部分的采样速度");
@@ -6743,6 +7076,22 @@ namespace ClashSpeedTestGUI
                 SettingsStore.Save(value);
                 Assert(SettingsStore.Load().ConfigSource == "fixture.yaml",
                     "隔离设置可以保存并读取");
+                File.WriteAllText(SettingsStore.SettingsPath,
+                    "{\"SpeedMode\":\"full\",\"UploadSizeMb\":50,"
+                    + "\"MinUploadSpeed\":2,\"TimeoutSeconds\":17,\"MaxPacketLoss\":25}",
+                    new UTF8Encoding(false));
+                AppSettings migrated = SettingsStore.Load();
+                string rewritten = File.ReadAllText(SettingsStore.SettingsPath, Encoding.UTF8);
+                Assert(migrated.SpeedMode == "download"
+                    && migrated.TimeoutSeconds == 17
+                    && migrated.ProbeTimeoutSeconds == 3
+                    && migrated.MaxHTTPProbeFailure == 25,
+                    "旧 full、上传字段、下载超时和探测失败阈值安全迁移");
+                Assert(!rewritten.Contains("UploadSizeMb")
+                    && !rewritten.Contains("MinUploadSpeed")
+                    && !rewritten.Contains("MaxPacketLoss")
+                    && rewritten.Contains("ProbeTimeoutSeconds"),
+                    "保存迁移设置时清除旧上传字段并写入探测超时");
             }
             finally
             {

@@ -20,7 +20,6 @@ import (
 	"clash-speedtest.local/speedtest-runner/internal/shareurl"
 	"clash-speedtest.local/speedtest-runner/internal/upstream/output"
 	"clash-speedtest.local/speedtest-runner/internal/upstream/speedtester"
-	"github.com/faceair/clash-speedtest/ip"
 	"gopkg.in/yaml.v2"
 )
 
@@ -29,19 +28,16 @@ var (
 	filterRegex      = flag.String("f", ".+", "filter proxies by name")
 	blockKeywords    = flag.String("b", "", "block proxies by keywords")
 	serverURL        = flag.String("server-url", "https://dl.google.com/chrome/mac/universal/stable/GGRO/googlechrome.dmg", "speed test URL")
-	speedMode        = flag.String("speed-mode", "download", "fast, download, or full")
+	speedMode        = flag.String("speed-mode", "download", "fast or download")
 	downloadSize     = flag.Int("download-size", 50*1024*1024, "download size")
-	uploadSize       = flag.Int("upload-size", 20*1024*1024, "upload size")
-	timeout          = flag.Duration("timeout", 5*time.Second, "request timeout")
-	transferParallel = flag.Int("concurrent", 4, "connections per node for transfer tests")
-	nodeParallel     = flag.Int("node-concurrent", 4, "nodes tested concurrently")
+	probeTimeout     = flag.Duration("probe-timeout", 3*time.Second, "timeout for each HTTP probe request")
+	timeout          = flag.Duration("timeout", 8*time.Second, "download transfer timeout")
+	transferParallel = flag.Int("concurrent", 4, "download connections per node")
+	nodeParallel     = flag.Int("node-concurrent", 4, "nodes probed concurrently")
 	outputPath       = flag.String("output", "", "output Clash YAML path")
 	maxLatency       = flag.Duration("max-latency", time.Second, "maximum latency")
-	maxPacketLoss    = flag.Float64("max-packet-loss", 100, "maximum HTTP probe failure rate in percent")
+	maxProbeFailure  = flag.Float64("max-probe-failure", 100, "maximum HTTP probe failure rate in percent")
 	minDownloadSpeed = flag.Float64("min-download-speed", 5, "minimum download speed in MB/s")
-	minUploadSpeed   = flag.Float64("min-upload-speed", 2, "minimum upload speed in MB/s")
-	renameNodes      = flag.Bool("rename", false, "rename output nodes")
-	renameTemplate   = flag.String("rename-template", "", "Go template for renamed nodes")
 	userAgent        = flag.String("ua", "", "User-Agent")
 	listConfigPath   = flag.String("list-config", "", "list nodes from a local Clash YAML file as JSON")
 	manageConfigPath = flag.String("manage-config", "", "apply local node management operations from JSON")
@@ -53,7 +49,7 @@ var legacyTSVSanitizer = strings.NewReplacer("\r", " ", "\n", " ", "\t", " ")
 
 const (
 	maxManagedFileSize        = 32 * 1024 * 1024
-	speedEventProtocolVersion = 4
+	speedEventProtocolVersion = 5
 )
 
 type proxyJob struct {
@@ -78,15 +74,17 @@ type resultEvent struct {
 }
 
 type resultMetrics struct {
-	LatencyNanoseconds     int64   `json:"latency_nanoseconds"`
-	JitterNanoseconds      int64   `json:"jitter_nanoseconds"`
-	PacketLossPercent      float64 `json:"packet_loss_percent"`
-	DownloadBytesPerSecond float64 `json:"download_bytes_per_second"`
-	UploadBytesPerSecond   float64 `json:"upload_bytes_per_second"`
-	DownloadTested         bool    `json:"download_tested"`
-	UploadTested           bool    `json:"upload_tested"`
-	DownloadComplete       bool    `json:"download_complete"`
-	UploadComplete         bool    `json:"upload_complete"`
+	LatencyNanoseconds      int64   `json:"latency_nanoseconds"`
+	JitterNanoseconds       int64   `json:"jitter_nanoseconds"`
+	HTTPProbeFailurePercent float64 `json:"http_probe_failure_percent"`
+	DownloadBytesPerSecond  float64 `json:"download_bytes_per_second"`
+	DownloadTested          bool    `json:"download_tested"`
+	DownloadComplete        bool    `json:"download_complete"`
+}
+
+type progressEvent struct {
+	ID    string `json:"id"`
+	Stage string `json:"stage"`
 }
 
 type managedConfig struct {
@@ -107,7 +105,7 @@ type nodeManagementResult struct {
 func main() {
 	flag.Parse()
 	if *versionFlag {
-		fmt.Println("speedtest-runner version 1.6.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
+		fmt.Println("speedtest-runner version 1.7.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
 		return
 	}
 	if strings.TrimSpace(*listConfigPath) != "" {
@@ -161,21 +159,20 @@ func main() {
 		fail("invalid speed test options: " + err.Error())
 	}
 	tester, err := speedtester.New(&speedtester.Config{
-		ConfigPaths:      *configPaths,
-		FilterRegex:      *filterRegex,
-		BlockRegex:       *blockKeywords,
-		ServerURL:        *serverURL,
-		DownloadSize:     *downloadSize,
-		UploadSize:       *uploadSize,
-		Timeout:          *timeout,
-		Concurrent:       *transferParallel,
-		MaxLatency:       *maxLatency,
-		MaxPacketLoss:    *maxPacketLoss,
-		MinDownloadSpeed: *minDownloadSpeed * 1024 * 1024,
-		MinUploadSpeed:   *minUploadSpeed * 1024 * 1024,
-		Mode:             mode,
-		OutputPath:       *outputPath,
-		UserAgent:        *userAgent,
+		ConfigPaths:         *configPaths,
+		FilterRegex:         *filterRegex,
+		BlockRegex:          *blockKeywords,
+		ServerURL:           *serverURL,
+		DownloadSize:        *downloadSize,
+		ProbeTimeout:        *probeTimeout,
+		DownloadTimeout:     *timeout,
+		Concurrent:          *transferParallel,
+		MaxLatency:          *maxLatency,
+		MaxHTTPProbeFailure: *maxProbeFailure,
+		MinDownloadSpeed:    *minDownloadSpeed * 1024 * 1024,
+		Mode:                mode,
+		OutputPath:          *outputPath,
+		UserAgent:           *userAgent,
 	})
 	if err != nil {
 		fail("create speed tester failed: " + err.Error())
@@ -228,8 +225,11 @@ func validateFilterRegex(expression string) error {
 }
 
 func validateSpeedOptions(mode speedtester.SpeedMode) error {
+	if *probeTimeout <= 0 {
+		return fmt.Errorf("probe timeout must be positive")
+	}
 	if *timeout <= 0 {
-		return fmt.Errorf("timeout must be positive")
+		return fmt.Errorf("download timeout must be positive")
 	}
 	if *nodeParallel < 1 || *nodeParallel > 128 {
 		return fmt.Errorf("node concurrency must be between 1 and 128")
@@ -240,20 +240,14 @@ func validateSpeedOptions(mode speedtester.SpeedMode) error {
 	if *maxLatency < 0 {
 		return fmt.Errorf("maximum latency cannot be negative")
 	}
-	if math.IsNaN(*maxPacketLoss) || math.IsInf(*maxPacketLoss, 0) || *maxPacketLoss < 0 || *maxPacketLoss > 100 {
+	if math.IsNaN(*maxProbeFailure) || math.IsInf(*maxProbeFailure, 0) || *maxProbeFailure < 0 || *maxProbeFailure > 100 {
 		return fmt.Errorf("maximum HTTP probe failure rate must be between 0 and 100")
 	}
 	if math.IsNaN(*minDownloadSpeed) || math.IsInf(*minDownloadSpeed, 0) || *minDownloadSpeed < 0 {
 		return fmt.Errorf("minimum download speed must be a finite non-negative number")
 	}
-	if math.IsNaN(*minUploadSpeed) || math.IsInf(*minUploadSpeed, 0) || *minUploadSpeed < 0 {
-		return fmt.Errorf("minimum upload speed must be a finite non-negative number")
-	}
 	if *downloadSize < 0 || (!mode.IsFast() && *downloadSize <= 0) {
 		return fmt.Errorf("download size must be positive in %s mode", mode)
-	}
-	if *uploadSize < 0 || (mode.UploadEnabled() && *uploadSize <= 0) {
-		return fmt.Errorf("upload size must be positive in %s mode", mode)
 	}
 	return nil
 }
@@ -593,67 +587,115 @@ func testInStages(
 		close(resultChannel)
 	}()
 
-	probed := make(map[string]*speedtester.Result, len(proxies))
-	for output := range resultChannel {
-		if _, exists := probed[output.name]; exists {
-			return nil, fmt.Errorf("duplicate probe result for proxy %q", output.name)
-		}
-		probed[output.name] = output.result
-	}
-	if len(probed) != len(proxies) {
-		return nil, fmt.Errorf("probe result count mismatch: got %d, want %d", len(probed), len(proxies))
-	}
-
 	results := make([]*speedtester.Result, 0, len(proxies))
+	seenProbeIDs := make(map[string]struct{}, len(proxies))
 	seenResultIDs := make(map[string]struct{}, len(proxies))
-	var writeErr error
-	for _, name := range names {
-		result := probed[name]
-		if result == nil {
-			if writeErr == nil {
-				writeErr = fmt.Errorf("speed tester returned a nil probe result for proxy %q", name)
-			}
-			continue
-		}
-		if tester.ShouldTestTransfers(result) {
-			tester.TestTransfers(result, proxies[name])
-		}
-		results = append(results, result)
-		id, known := nodeIDs[result.ProxyName]
+
+	type downloadJob struct {
+		name   string
+		result *speedtester.Result
+	}
+	downloadDone := make(chan downloadJob, 1)
+	pendingDownloads := make([]downloadJob, 0, len(proxies))
+	downloadRunning := false
+	probeChannel := resultChannel
+
+	writeProgress := func(name, stage string) error {
+		id, known := nodeIDs[name]
 		if !known || id == "" {
-			if writeErr == nil {
-				writeErr = fmt.Errorf("result references unknown proxy %q", result.ProxyName)
-			}
-			continue
+			return fmt.Errorf("progress references unknown proxy %q", name)
 		}
-		if _, duplicate := seenResultIDs[id]; duplicate {
-			if writeErr == nil {
-				writeErr = fmt.Errorf("duplicate result for proxy %q", result.ProxyName)
-			}
-			continue
-		}
-		seenResultIDs[id] = struct{}{}
-		row := output.FormatRow(result, mode, len(results)-1)
-		if writeErr != nil {
-			continue
-		}
-		event := buildResultEvent(id, row, result, mode, isUsable(result, mode))
-		if err := writeEvent(writer, "@resultjson", event); err != nil {
-			writeErr = fmt.Errorf("write result event for proxy %q: %w", result.ProxyName, err)
-			continue
-		}
-		if _, err := writer.WriteString(strings.Join(sanitizeLegacyTSVCells(row), "\t") + "\n"); err != nil {
-			writeErr = fmt.Errorf("write result row for proxy %q: %w", result.ProxyName, err)
-			continue
+		if err := writeEvent(writer, "@progressjson", progressEvent{ID: id, Stage: stage}); err != nil {
+			return fmt.Errorf("write %s progress for proxy %q: %w", stage, name, err)
 		}
 		if err := writer.Flush(); err != nil {
-			writeErr = fmt.Errorf("flush result row for proxy %q: %w", result.ProxyName, err)
+			return fmt.Errorf("flush %s progress for proxy %q: %w", stage, name, err)
+		}
+		return nil
+	}
+	writeResult := func(result *speedtester.Result) error {
+		if result == nil {
+			return fmt.Errorf("speed tester returned a nil result")
+		}
+		id, known := nodeIDs[result.ProxyName]
+		if !known || id == "" {
+			return fmt.Errorf("result references unknown proxy %q", result.ProxyName)
+		}
+		if _, duplicate := seenResultIDs[id]; duplicate {
+			return fmt.Errorf("duplicate result for proxy %q", result.ProxyName)
+		}
+		seenResultIDs[id] = struct{}{}
+		results = append(results, result)
+		row := output.FormatRow(result, mode, len(results)-1)
+		event := buildResultEvent(id, row, result, mode, isUsable(result, mode))
+		if err := writeEvent(writer, "@resultjson", event); err != nil {
+			return fmt.Errorf("write result event for proxy %q: %w", result.ProxyName, err)
+		}
+		if _, err := writer.WriteString(strings.Join(sanitizeLegacyTSVCells(row), "\t") + "\n"); err != nil {
+			return fmt.Errorf("write result row for proxy %q: %w", result.ProxyName, err)
+		}
+		if err := writer.Flush(); err != nil {
+			return fmt.Errorf("flush result row for proxy %q: %w", result.ProxyName, err)
+		}
+		return nil
+	}
+
+	for len(seenResultIDs) < len(proxies) {
+		if !downloadRunning && len(pendingDownloads) > 0 {
+			job := pendingDownloads[0]
+			pendingDownloads = pendingDownloads[1:]
+			if err := writeProgress(job.name, "download_started"); err != nil {
+				return results, err
+			}
+			downloadRunning = true
+			go func(job downloadJob) {
+				tester.TestTransfers(job.result, proxies[job.name])
+				downloadDone <- job
+			}(job)
+		}
+		if probeChannel == nil && !downloadRunning && len(pendingDownloads) == 0 {
+			return results, fmt.Errorf("speed result count mismatch: got %d, want %d", len(seenResultIDs), len(proxies))
+		}
+
+		select {
+		case probed, ok := <-probeChannel:
+			if !ok {
+				probeChannel = nil
+				continue
+			}
+			if probed.result == nil {
+				return results, fmt.Errorf("speed tester returned a nil probe result for proxy %q", probed.name)
+			}
+			id, known := nodeIDs[probed.name]
+			if !known || id == "" {
+				return results, fmt.Errorf("probe references unknown proxy %q", probed.name)
+			}
+			if _, duplicate := seenProbeIDs[id]; duplicate {
+				return results, fmt.Errorf("duplicate probe result for proxy %q", probed.name)
+			}
+			seenProbeIDs[id] = struct{}{}
+			if err := writeProgress(probed.name, "probe_completed"); err != nil {
+				return results, err
+			}
+			if tester.ShouldTestTransfers(probed.result) {
+				pendingDownloads = append(pendingDownloads, downloadJob{
+					name: probed.name, result: probed.result,
+				})
+			} else if err := writeResult(probed.result); err != nil {
+				return results, err
+			}
+		case completed := <-downloadDone:
+			downloadRunning = false
+			if err := writeResult(completed.result); err != nil {
+				return results, err
+			}
 		}
 	}
-	if writeErr == nil && len(seenResultIDs) != len(proxies) {
-		writeErr = fmt.Errorf("result count mismatch: got %d, want %d", len(seenResultIDs), len(proxies))
+
+	if len(seenProbeIDs) != len(proxies) {
+		return results, fmt.Errorf("probe result count mismatch: got %d, want %d", len(seenProbeIDs), len(proxies))
 	}
-	return results, writeErr
+	return results, nil
 }
 
 func buildResultEvent(
@@ -664,29 +706,21 @@ func buildResultEvent(
 	usable bool,
 ) resultEvent {
 	downloadTested := !mode.IsFast() && result.DownloadTested
-	uploadTested := mode.UploadEnabled() && result.UploadTested
 	downloadSpeed := result.DownloadSpeed
-	uploadSpeed := result.UploadSpeed
 	if !downloadTested {
 		downloadSpeed = 0
-	}
-	if !uploadTested {
-		uploadSpeed = 0
 	}
 	return resultEvent{
 		ID:     id,
 		Cells:  row,
 		Usable: usable,
 		Metrics: resultMetrics{
-			LatencyNanoseconds:     int64(result.Latency),
-			JitterNanoseconds:      int64(result.Jitter),
-			PacketLossPercent:      result.PacketLoss,
-			DownloadBytesPerSecond: downloadSpeed,
-			UploadBytesPerSecond:   uploadSpeed,
-			DownloadTested:         downloadTested,
-			UploadTested:           uploadTested,
-			DownloadComplete:       downloadTested && result.DownloadComplete,
-			UploadComplete:         uploadTested && result.UploadComplete,
+			LatencyNanoseconds:      int64(result.Latency),
+			JitterNanoseconds:       int64(result.Jitter),
+			HTTPProbeFailurePercent: result.HTTPProbeFailurePercent,
+			DownloadBytesPerSecond:  downloadSpeed,
+			DownloadTested:          downloadTested,
+			DownloadComplete:        downloadTested && result.DownloadComplete,
 		},
 	}
 }
@@ -757,7 +791,6 @@ func jsonCompatibleValue(value any) any {
 
 func saveConfig(results []*speedtester.Result, mode speedtester.SpeedMode) error {
 	proxies := make([]map[string]any, 0, len(results))
-	nameCount := make(map[string]int)
 
 	for _, result := range results {
 		if !isUsable(result, mode) {
@@ -766,25 +799,6 @@ func saveConfig(results []*speedtester.Result, mode speedtester.SpeedMode) error
 		proxyConfig := result.ProxyConfig
 		if proxyConfig == nil || proxyConfig["name"] == nil || proxyConfig["server"] == nil {
 			continue
-		}
-		if *renameNodes {
-			server, ok := proxyConfig["server"].(string)
-			if ok {
-				location, err := ip.GetIPLocation(server)
-				if err == nil && location.CountryCode != "" {
-					name, templateErr := ip.GenerateNodeNameFromTemplate(
-						*renameTemplate,
-						location.CountryCode,
-						result.Latency,
-						result.DownloadSpeed,
-						result.UploadSpeed,
-						nameCount,
-					)
-					if templateErr == nil {
-						proxyConfig["name"] = name
-					}
-				}
-			}
 		}
 		proxies = append(proxies, proxyConfig)
 	}
@@ -801,13 +815,13 @@ func saveConfig(results []*speedtester.Result, mode speedtester.SpeedMode) error
 }
 
 func isUsable(result *speedtester.Result, mode speedtester.SpeedMode) bool {
-	if result == nil || result.Latency <= 0 || result.PacketLoss >= 100 {
+	if result == nil || result.Latency <= 0 || result.HTTPProbeFailurePercent >= 100 {
 		return false
 	}
 	if *maxLatency > 0 && result.Latency > *maxLatency {
 		return false
 	}
-	if *maxPacketLoss >= 0 && result.PacketLoss > *maxPacketLoss {
+	if *maxProbeFailure >= 0 && result.HTTPProbeFailurePercent > *maxProbeFailure {
 		return false
 	}
 	if !mode.IsFast() && *downloadSize > 0 {
@@ -815,14 +829,6 @@ func isUsable(result *speedtester.Result, mode speedtester.SpeedMode) bool {
 			return false
 		}
 		if *minDownloadSpeed > 0 && result.DownloadSpeed < *minDownloadSpeed*1024*1024 {
-			return false
-		}
-	}
-	if mode.UploadEnabled() && *uploadSize > 0 {
-		if !result.UploadTested || !result.UploadComplete || result.UploadError != "" || result.UploadSpeed <= 0 {
-			return false
-		}
-		if *minUploadSpeed > 0 && result.UploadSpeed < *minUploadSpeed*1024*1024 {
 			return false
 		}
 	}

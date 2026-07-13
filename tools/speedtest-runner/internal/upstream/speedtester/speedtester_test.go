@@ -75,10 +75,11 @@ func TestTransferSummaryUsesBatchWallClockDuration(t *testing.T) {
 
 func TestLatencyUsesRequestTimeoutInsteadOfFilterThreshold(t *testing.T) {
 	tester, err := New(&Config{
-		ServerURL:  "https://example.com/file.bin",
-		Mode:       SpeedModeFast,
-		Timeout:    3 * time.Second,
-		MaxLatency: 0,
+		ServerURL:       "https://example.com/file.bin",
+		Mode:            SpeedModeFast,
+		ProbeTimeout:    3 * time.Second,
+		DownloadTimeout: 11 * time.Second,
+		MaxLatency:      0,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +89,9 @@ func TestLatencyUsesRequestTimeoutInsteadOfFilterThreshold(t *testing.T) {
 	}
 	if tester.config.MaxLatency != 0 {
 		t.Fatal("latency filter threshold must remain independent from request timeout")
+	}
+	if tester.config.DownloadTimeout != 11*time.Second {
+		t.Fatalf("download timeout=%v, want 11s", tester.config.DownloadTimeout)
 	}
 }
 
@@ -110,6 +114,8 @@ func TestConsumeDownloadResponseEnforcesRangeAndSize(t *testing.T) {
 			body: "abcd", wantError: "Content-Range"},
 		{name: "wrong content range", status: http.StatusPartialContent,
 			contentRange: "bytes 1-4/10", body: "abcd", wantError: "Content-Range"},
+		{name: "oversized content range", status: http.StatusPartialContent,
+			contentRange: "bytes 0-4/10", body: "abcde", wantError: "Content-Range"},
 	}
 
 	for _, test := range tests {
@@ -148,32 +154,17 @@ func TestResultFormatErrors(t *testing.T) {
 	if result.FormatDownloadError() != "N/A" {
 		t.Fatalf("expected empty download error to format as N/A, got %q", result.FormatDownloadError())
 	}
-	if result.FormatUploadError() != "N/A" {
-		t.Fatalf("expected empty upload error to format as N/A, got %q", result.FormatUploadError())
-	}
-
 	result.DownloadError = "download failed: timeout"
-	result.UploadError = "upload failed: status 500"
 	if result.FormatDownloadError() != result.DownloadError {
 		t.Fatalf("expected download error to pass through, got %q", result.FormatDownloadError())
 	}
-	if result.FormatUploadError() != result.UploadError {
-		t.Fatalf("expected upload error to pass through, got %q", result.FormatUploadError())
-	}
 
 	result.DownloadSpeed = 1024
-	result.UploadSpeed = 2048
 	if result.FormatDownloadSpeed() == result.DownloadError {
 		t.Fatalf("partial download speed must remain visible, got %q", result.FormatDownloadSpeed())
 	}
-	if result.FormatUploadSpeed() == result.UploadError {
-		t.Fatalf("partial upload speed must remain visible, got %q", result.FormatUploadSpeed())
-	}
 	if result.FormatDownloadSpeedValue() == result.DownloadError {
 		t.Fatalf("expected download speed value to ignore error string")
-	}
-	if result.FormatUploadSpeedValue() == result.UploadError {
-		t.Fatalf("expected upload speed value to ignore error string")
 	}
 }
 
@@ -184,8 +175,8 @@ func TestFetchHTTPConfigRejectsHTTPError(t *testing.T) {
 	defer server.Close()
 
 	tester, err := New(&Config{
-		ServerURL: "https://example.com/file.bin",
-		Timeout:   time.Second,
+		ServerURL:    "https://example.com/file.bin",
+		ProbeTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -277,12 +268,12 @@ proxies: []
 	}
 
 	tester, err := New(&Config{
-		ConfigPaths: configPath,
-		FilterRegex: ".*",
-		ServerURL:   "https://example.com/file.bin",
-		Mode:        SpeedModeFast,
-		Timeout:     2 * time.Second,
-		Concurrent:  1,
+		ConfigPaths:  configPath,
+		FilterRegex:  ".*",
+		ServerURL:    "https://example.com/file.bin",
+		Mode:         SpeedModeFast,
+		ProbeTimeout: 2 * time.Second,
+		Concurrent:   1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -315,12 +306,15 @@ proxies: []
 	}
 }
 
-func TestBaseServerFullModeEndToEnd(t *testing.T) {
+func TestBaseServerDownloadModeEndToEndNeverUploads(t *testing.T) {
 	var probeRequests atomic.Int32
 	var downloadRequests atomic.Int32
-	var uploadRequests atomic.Int32
-	var uploadedBytes atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.Path == "/__up" {
+			t.Errorf("pure download mode sent forbidden request: %s %s", r.Method, r.URL.Path)
+			http.Error(w, "uploads are forbidden", http.StatusMethodNotAllowed)
+			return
+		}
 		switch r.URL.Path {
 		case "/__down":
 			size, err := strconv.Atoi(r.URL.Query().Get("bytes"))
@@ -339,19 +333,6 @@ func TestBaseServerFullModeEndToEnd(t *testing.T) {
 			}
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write(make([]byte, size))
-		case "/__up":
-			uploadRequests.Add(1)
-			if r.ContentLength <= 0 {
-				http.Error(w, "content length is required", http.StatusLengthRequired)
-				return
-			}
-			body, err := io.ReadAll(r.Body)
-			if err != nil || int64(len(body)) != r.ContentLength {
-				http.Error(w, "incomplete upload", http.StatusBadRequest)
-				return
-			}
-			uploadedBytes.Add(int64(len(body)))
-			w.WriteHeader(http.StatusOK)
 		default:
 			http.NotFound(w, r)
 		}
@@ -359,14 +340,14 @@ func TestBaseServerFullModeEndToEnd(t *testing.T) {
 	defer server.Close()
 
 	tester, err := New(&Config{
-		ServerURL:     server.URL,
-		Mode:          SpeedModeFull,
-		DownloadSize:  32 * 1024,
-		UploadSize:    16 * 1024,
-		Timeout:       2 * time.Second,
-		Concurrent:    2,
-		OutputPath:    "result.yaml",
-		MaxPacketLoss: 100,
+		ServerURL:           server.URL,
+		Mode:                SpeedModeDownload,
+		DownloadSize:        32 * 1024,
+		ProbeTimeout:        2 * time.Second,
+		DownloadTimeout:     2 * time.Second,
+		Concurrent:          2,
+		OutputPath:          "result.yaml",
+		MaxHTTPProbeFailure: 100,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -376,27 +357,21 @@ func TestBaseServerFullModeEndToEnd(t *testing.T) {
 		Config: map[string]any{"name": "direct-test", "type": "direct", "server": "127.0.0.1"},
 	}
 	result := tester.ProbeProxy("direct-test", proxy)
-	if result.Latency <= 0 || result.PacketLoss != 0 {
-		t.Fatalf("base-server probe failed: latency=%v failure-rate=%v", result.Latency, result.PacketLoss)
+	if result.Latency <= 0 || result.HTTPProbeFailurePercent != 0 {
+		t.Fatalf("base-server probe failed: latency=%v failure-rate=%v", result.Latency, result.HTTPProbeFailurePercent)
 	}
 	if !tester.ShouldTestTransfers(result) {
-		t.Fatal("reachable full-mode node must enter transfer phase")
+		t.Fatal("reachable download-mode node must enter transfer phase")
 	}
 	tester.TestTransfers(result, proxy)
 	if !result.DownloadTested || !result.DownloadComplete || result.DownloadSpeed <= 0 || result.DownloadError != "" {
 		t.Fatalf("download did not complete: %#v", result)
 	}
-	if !result.UploadTested || !result.UploadComplete || result.UploadSpeed <= 0 || result.UploadError != "" {
-		t.Fatalf("upload did not complete: %#v", result)
-	}
 	if probeRequests.Load() != latencyWarmupRequests+latencyMeasuredRequests {
 		t.Fatalf("probe requests=%d, want %d", probeRequests.Load(), latencyWarmupRequests+latencyMeasuredRequests)
 	}
-	if downloadRequests.Load() != 2 || uploadRequests.Load() != 2 {
-		t.Fatalf("transfer requests: download=%d upload=%d", downloadRequests.Load(), uploadRequests.Load())
-	}
-	if uploadedBytes.Load() != 16*1024 {
-		t.Fatalf("uploaded bytes=%d, want %d", uploadedBytes.Load(), 16*1024)
+	if downloadRequests.Load() != 2 {
+		t.Fatalf("download requests=%d, want 2", downloadRequests.Load())
 	}
 }
 
@@ -406,15 +381,43 @@ func TestLatencyProbeRejectsHTTPFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	tester, err := New(&Config{
-		ServerURL: server.URL, Mode: SpeedModeFast, Timeout: time.Second, Concurrent: 1,
+		ServerURL: server.URL, Mode: SpeedModeFast, ProbeTimeout: time.Second, Concurrent: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	proxy := &CProxy{Proxy: adapter.NewProxy(outbound.NewDirect()), Config: map[string]any{}}
 	result := tester.ProbeProxy("failure", proxy)
-	if result.Latency != 0 || result.PacketLoss != 100 {
-		t.Fatalf("HTTP 503 must be a failed probe: latency=%v rate=%v", result.Latency, result.PacketLoss)
+	if result.Latency != 0 || result.HTTPProbeFailurePercent != 100 {
+		t.Fatalf("HTTP 503 must be a failed probe: latency=%v rate=%v", result.Latency, result.HTTPProbeFailurePercent)
+	}
+}
+
+func TestDirectLatencyProbeUsesOneByteGET(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodGet || r.Header.Get("Range") != "bytes=0-0" {
+			t.Errorf("probe request=%s Range=%q, want one-byte GET", r.Method, r.Header.Get("Range"))
+		}
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte{0})
+	}))
+	defer server.Close()
+	tester, err := New(&Config{
+		ServerURL: server.URL + "/download.bin", Mode: SpeedModeFast,
+		ProbeTimeout: time.Second, Concurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := &CProxy{Proxy: adapter.NewProxy(outbound.NewDirect()), Config: map[string]any{}}
+	result := tester.ProbeProxy("direct", proxy)
+	if result.Latency <= 0 || result.HTTPProbeFailurePercent != 0 {
+		t.Fatalf("one-byte direct probe failed: %#v", result)
+	}
+	if requests.Load() != latencyWarmupRequests+latencyMeasuredRequests {
+		t.Fatalf("request count=%d, want warmup plus five samples", requests.Load())
 	}
 }
 
@@ -425,8 +428,11 @@ func TestLatencyStatsUseMedianAndMeasuredDenominator(t *testing.T) {
 	if result.latency != 11500*time.Microsecond {
 		t.Fatalf("median latency=%v, want 11.5ms", result.latency)
 	}
-	if result.packetLoss != 20 {
-		t.Fatalf("failure rate=%v, want 20", result.packetLoss)
+	if result.httpProbeFailurePercent != 20 {
+		t.Fatalf("failure rate=%v, want 20", result.httpProbeFailurePercent)
+	}
+	if result.jitter < 81*time.Millisecond || result.jitter > 82*time.Millisecond {
+		t.Fatalf("population standard deviation jitter=%v, want about 81.84ms", result.jitter)
 	}
 }
 

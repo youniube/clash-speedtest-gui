@@ -65,7 +65,7 @@ UI 自动化启动 GUI 时，还应把 `TEMP` 和 `TMP` 指向沙箱内目录，
 
 ## 固定测速数据
 
-测速协议始终是严格 v4，支持 GUI 的 `fast`、`download` 和 `full` 三种表头；吞吐表头使用“HTTP 探测失败率”，不再误称“丢包率”。每个结果除原始速度和 `download_tested` / `upload_tested` 外，还会携带 `download_complete` / `upload_complete`：`tested` 表示已经启动对应传输，`complete` 表示计划传输全部完成。
+测速协议始终是严格 v5，只支持 GUI 的 `fast` 和 `download` 两种表头；主界面使用“HTTP 延迟”，下载表头使用“HTTP 探测失败率”。每个结果只携带延迟、抖动、HTTP 探测失败率、下载速度、`download_tested` 和 `download_complete` 六项原始指标：`tested` 表示下载已经启动，`complete` 表示计划传输全部完成。
 
 | 稳定 ID | 名称 | 类型 | 延迟 | `usable` | 导出 |
 |---|---|---|---:|---|---|
@@ -75,12 +75,15 @@ UI 自动化启动 GUI 时，还应把 `TEMP` 和 `TMP` 指向沙箱内目录，
 
 正常测速输出顺序为：
 
-1. `@protocol\t4`
+1. `@protocol\t5`
 2. 当前模式的固定表头
 3. `@nodes\t3`
 4. 三个完整 `@nodejson`
-5. 三个一一对应、带原始指标和 `usable` 的 `@resultjson`
-6. 写出只包含 A、B 的两节点 YAML
+5. 每个节点一个 `probe_completed` 的 `@progressjson`
+6. 快速模式按节点依次立即输出最终结果；下载模式先输出失败 C 的结果，再为 A、B 串行输出 `download_started` 和最终结果
+7. 写出只包含 A、B 的两节点 YAML
+
+夹具会在关键阶段立即 Flush，用来验证 GUI 无需等待整批探测即可更新行状态。协议校验覆盖重复、乱序、未知 ID、缺失事件和半截输出。
 
 `-list-config <path>` 要求文件已经存在，并返回只包含 A、B 的 JSON 节点清单。这与 GUI 对临时输出和最终输出各执行一次对账的流程一致。
 
