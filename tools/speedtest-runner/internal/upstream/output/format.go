@@ -9,8 +9,8 @@ import (
 
 // GetHeaders returns table headers based on speed mode.
 // fast: ID, Name, Type, Latency
-// download: ID, Name, Type, Latency, Jitter, Packet Loss, Download Speed
-// full: ID, Name, Type, Latency, Jitter, Packet Loss, Download Speed, Upload Speed
+// download: ID, Name, Type, Latency, Jitter, HTTP Probe Failure Rate, Download Speed
+// full: ID, Name, Type, Latency, Jitter, HTTP Probe Failure Rate, Download Speed, Upload Speed
 func GetHeaders(mode speedtester.SpeedMode) []string {
 	if mode.IsFast() {
 		return []string{
@@ -26,7 +26,7 @@ func GetHeaders(mode speedtester.SpeedMode) []string {
 		"类型",
 		"延迟",
 		"抖动",
-		"丢包率",
+		"HTTP 探测失败率",
 		"下载速度",
 	}
 	if mode.UploadEnabled() {

@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -36,7 +37,7 @@ var (
 	nodeParallel     = flag.Int("node-concurrent", 4, "nodes tested concurrently")
 	outputPath       = flag.String("output", "", "output Clash YAML path")
 	maxLatency       = flag.Duration("max-latency", time.Second, "maximum latency")
-	maxPacketLoss    = flag.Float64("max-packet-loss", 100, "maximum packet loss")
+	maxPacketLoss    = flag.Float64("max-packet-loss", 100, "maximum HTTP probe failure rate in percent")
 	minDownloadSpeed = flag.Float64("min-download-speed", 5, "minimum download speed in MB/s")
 	minUploadSpeed   = flag.Float64("min-upload-speed", 2, "minimum upload speed in MB/s")
 	renameNodes      = flag.Bool("rename", false, "rename output nodes")
@@ -52,7 +53,7 @@ var legacyTSVSanitizer = strings.NewReplacer("\r", " ", "\n", " ", "\t", " ")
 
 const (
 	maxManagedFileSize        = 32 * 1024 * 1024
-	speedEventProtocolVersion = 3
+	speedEventProtocolVersion = 4
 )
 
 type proxyJob struct {
@@ -84,6 +85,8 @@ type resultMetrics struct {
 	UploadBytesPerSecond   float64 `json:"upload_bytes_per_second"`
 	DownloadTested         bool    `json:"download_tested"`
 	UploadTested           bool    `json:"upload_tested"`
+	DownloadComplete       bool    `json:"download_complete"`
+	UploadComplete         bool    `json:"upload_complete"`
 }
 
 type managedConfig struct {
@@ -104,7 +107,7 @@ type nodeManagementResult struct {
 func main() {
 	flag.Parse()
 	if *versionFlag {
-		fmt.Println("speedtest-runner version 1.5.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
+		fmt.Println("speedtest-runner version 1.6.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
 		return
 	}
 	if strings.TrimSpace(*listConfigPath) != "" {
@@ -154,6 +157,9 @@ func main() {
 	if err != nil {
 		fail("invalid speed mode")
 	}
+	if err := validateSpeedOptions(mode); err != nil {
+		fail("invalid speed test options: " + err.Error())
+	}
 	tester, err := speedtester.New(&speedtester.Config{
 		ConfigPaths:      *configPaths,
 		FilterRegex:      *filterRegex,
@@ -162,7 +168,7 @@ func main() {
 		DownloadSize:     *downloadSize,
 		UploadSize:       *uploadSize,
 		Timeout:          *timeout,
-		Concurrent:       max(1, *transferParallel),
+		Concurrent:       *transferParallel,
 		MaxLatency:       *maxLatency,
 		MaxPacketLoss:    *maxPacketLoss,
 		MinDownloadSpeed: *minDownloadSpeed * 1024 * 1024,
@@ -200,7 +206,7 @@ func main() {
 		fail("flush node manifest failed: " + err.Error())
 	}
 
-	results, err := testConcurrently(tester, proxies, nodeIDs, mode, writer, max(1, *nodeParallel))
+	results, err := testInStages(tester, proxies, nodeIDs, mode, writer, *nodeParallel)
 	if err != nil {
 		fail("write speed test results failed: " + err.Error())
 	}
@@ -217,6 +223,37 @@ func main() {
 func validateFilterRegex(expression string) error {
 	if _, err := regexp.Compile(expression); err != nil {
 		return fmt.Errorf("invalid node filter regex: %w", err)
+	}
+	return nil
+}
+
+func validateSpeedOptions(mode speedtester.SpeedMode) error {
+	if *timeout <= 0 {
+		return fmt.Errorf("timeout must be positive")
+	}
+	if *nodeParallel < 1 || *nodeParallel > 128 {
+		return fmt.Errorf("node concurrency must be between 1 and 128")
+	}
+	if *transferParallel < 1 || *transferParallel > speedtester.MaxTransferConcurrency {
+		return fmt.Errorf("transfer concurrency must be between 1 and %d", speedtester.MaxTransferConcurrency)
+	}
+	if *maxLatency < 0 {
+		return fmt.Errorf("maximum latency cannot be negative")
+	}
+	if math.IsNaN(*maxPacketLoss) || math.IsInf(*maxPacketLoss, 0) || *maxPacketLoss < 0 || *maxPacketLoss > 100 {
+		return fmt.Errorf("maximum HTTP probe failure rate must be between 0 and 100")
+	}
+	if math.IsNaN(*minDownloadSpeed) || math.IsInf(*minDownloadSpeed, 0) || *minDownloadSpeed < 0 {
+		return fmt.Errorf("minimum download speed must be a finite non-negative number")
+	}
+	if math.IsNaN(*minUploadSpeed) || math.IsInf(*minUploadSpeed, 0) || *minUploadSpeed < 0 {
+		return fmt.Errorf("minimum upload speed must be a finite non-negative number")
+	}
+	if *downloadSize < 0 || (!mode.IsFast() && *downloadSize <= 0) {
+		return fmt.Errorf("download size must be positive in %s mode", mode)
+	}
+	if *uploadSize < 0 || (mode.UploadEnabled() && *uploadSize <= 0) {
+		return fmt.Errorf("upload size must be positive in %s mode", mode)
 	}
 	return nil
 }
@@ -505,7 +542,7 @@ func writeManifest(writer *bufio.Writer, proxies map[string]*speedtester.CProxy)
 	return nodeIDs, nil
 }
 
-func testConcurrently(
+func testInStages(
 	tester *speedtester.SpeedTester,
 	proxies map[string]*speedtester.CProxy,
 	nodeIDs map[string]string,
@@ -516,8 +553,21 @@ func testConcurrently(
 	if parallel > len(proxies) {
 		parallel = len(proxies)
 	}
+	if parallel < 1 {
+		return nil, fmt.Errorf("node concurrency must be positive")
+	}
+	names := make([]string, 0, len(proxies))
+	for name := range proxies {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
 	jobs := make(chan proxyJob)
-	resultChannel := make(chan *speedtester.Result, len(proxies))
+	type probeOutput struct {
+		name   string
+		result *speedtester.Result
+	}
+	resultChannel := make(chan probeOutput, len(proxies))
 	var workers sync.WaitGroup
 
 	for range parallel {
@@ -525,16 +575,17 @@ func testConcurrently(
 		go func() {
 			defer workers.Done()
 			for job := range jobs {
-				single := map[string]*speedtester.CProxy{job.name: job.proxy}
-				tester.TestProxies(single, func(result *speedtester.Result) {
-					resultChannel <- result
-				})
+				resultChannel <- probeOutput{
+					name:   job.name,
+					result: tester.ProbeProxy(job.name, job.proxy),
+				}
 			}
 		}()
 	}
 
 	go func() {
-		for name, proxy := range proxies {
+		for _, name := range names {
+			proxy := proxies[name]
 			jobs <- proxyJob{name: name, proxy: proxy}
 		}
 		close(jobs)
@@ -542,15 +593,30 @@ func testConcurrently(
 		close(resultChannel)
 	}()
 
+	probed := make(map[string]*speedtester.Result, len(proxies))
+	for output := range resultChannel {
+		if _, exists := probed[output.name]; exists {
+			return nil, fmt.Errorf("duplicate probe result for proxy %q", output.name)
+		}
+		probed[output.name] = output.result
+	}
+	if len(probed) != len(proxies) {
+		return nil, fmt.Errorf("probe result count mismatch: got %d, want %d", len(probed), len(proxies))
+	}
+
 	results := make([]*speedtester.Result, 0, len(proxies))
 	seenResultIDs := make(map[string]struct{}, len(proxies))
 	var writeErr error
-	for result := range resultChannel {
+	for _, name := range names {
+		result := probed[name]
 		if result == nil {
 			if writeErr == nil {
-				writeErr = fmt.Errorf("speed tester returned a nil result")
+				writeErr = fmt.Errorf("speed tester returned a nil probe result for proxy %q", name)
 			}
 			continue
+		}
+		if tester.ShouldTestTransfers(result) {
+			tester.TestTransfers(result, proxies[name])
 		}
 		results = append(results, result)
 		id, known := nodeIDs[result.ProxyName]
@@ -597,10 +663,8 @@ func buildResultEvent(
 	mode speedtester.SpeedMode,
 	usable bool,
 ) resultEvent {
-	downloadTested := !mode.IsFast() && transferWasTested(
-		result.DownloadSize, result.DownloadTime, result.DownloadSpeed, result.DownloadError)
-	uploadTested := mode.UploadEnabled() && transferWasTested(
-		result.UploadSize, result.UploadTime, result.UploadSpeed, result.UploadError)
+	downloadTested := !mode.IsFast() && result.DownloadTested
+	uploadTested := mode.UploadEnabled() && result.UploadTested
 	downloadSpeed := result.DownloadSpeed
 	uploadSpeed := result.UploadSpeed
 	if !downloadTested {
@@ -621,12 +685,10 @@ func buildResultEvent(
 			UploadBytesPerSecond:   uploadSpeed,
 			DownloadTested:         downloadTested,
 			UploadTested:           uploadTested,
+			DownloadComplete:       downloadTested && result.DownloadComplete,
+			UploadComplete:         uploadTested && result.UploadComplete,
 		},
 	}
-}
-
-func transferWasTested(size float64, duration time.Duration, speed float64, transferError string) bool {
-	return size != 0 || duration != 0 || speed != 0 || transferError != ""
 }
 
 func sanitizeLegacyTSVCells(row []string) []string {
@@ -749,7 +811,7 @@ func isUsable(result *speedtester.Result, mode speedtester.SpeedMode) bool {
 		return false
 	}
 	if !mode.IsFast() && *downloadSize > 0 {
-		if result.DownloadError != "" || result.DownloadSpeed <= 0 {
+		if !result.DownloadTested || !result.DownloadComplete || result.DownloadError != "" || result.DownloadSpeed <= 0 {
 			return false
 		}
 		if *minDownloadSpeed > 0 && result.DownloadSpeed < *minDownloadSpeed*1024*1024 {
@@ -757,7 +819,7 @@ func isUsable(result *speedtester.Result, mode speedtester.SpeedMode) bool {
 		}
 	}
 	if mode.UploadEnabled() && *uploadSize > 0 {
-		if result.UploadError != "" || result.UploadSpeed <= 0 {
+		if !result.UploadTested || !result.UploadComplete || result.UploadError != "" || result.UploadSpeed <= 0 {
 			return false
 		}
 		if *minUploadSpeed > 0 && result.UploadSpeed < *minUploadSpeed*1024*1024 {

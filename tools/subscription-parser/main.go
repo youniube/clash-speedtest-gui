@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -17,8 +18,18 @@ import (
 )
 
 const (
-	defaultUserAgent = "mihomo/1.19.27"
-	maxHTTPAttempts  = 3
+	defaultUserAgent  = "mihomo/1.19.27"
+	maxHTTPAttempts   = 3
+	maxHTTPInputBytes = 32 * 1024 * 1024
+	maxHTTPInputMiB   = maxHTTPInputBytes / (1024 * 1024)
+)
+
+var (
+	errInvalidSubscriptionURL = errors.New("invalid subscription URL")
+	errHTTPNetwork            = errors.New("subscription network request failed")
+	errHTTPRead               = errors.New("subscription response read failed")
+	errHTTPTimeout            = errors.New("subscription request timed out")
+	errHTTPInputTooLarge      = fmt.Errorf("subscription response exceeds %d MiB limit", maxHTTPInputMiB)
 )
 
 type rawConfig struct {
@@ -110,37 +121,47 @@ func readHTTPInput(input, userAgent string, timeout time.Duration) ([]byte, erro
 	for attempt := 1; attempt <= maxHTTPAttempts; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, input, nil)
 		if err != nil {
-			return nil, err
+			return nil, errInvalidSubscriptionURL
 		}
 		req.Header.Set("User-Agent", userAgent)
 
 		resp, err := client.Do(req)
 		retryable := err != nil
 		if err != nil {
-			lastErr = err
+			lastErr = sanitizedHTTPError(ctx, errHTTPNetwork)
 		} else if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 			_ = resp.Body.Close()
 			lastErr = fmt.Errorf("server returned HTTP %d", resp.StatusCode)
 			retryable = resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500
 		} else {
-			body, readErr := io.ReadAll(io.LimitReader(resp.Body, 32*1024*1024))
+			body, readErr := io.ReadAll(io.LimitReader(resp.Body, maxHTTPInputBytes+1))
 			_ = resp.Body.Close()
-			if readErr == nil {
+			if readErr != nil {
+				lastErr = sanitizedHTTPError(ctx, errHTTPRead)
+				retryable = true
+			} else if len(body) > maxHTTPInputBytes {
+				return nil, errHTTPInputTooLarge
+			} else {
 				return body, nil
 			}
-			lastErr = readErr
-			retryable = true
 		}
 
 		if !retryable || attempt == maxHTTPAttempts {
 			return nil, lastErr
 		}
 		if err := waitForRetry(ctx, time.Duration(attempt)*200*time.Millisecond); err != nil {
-			return nil, fmt.Errorf("%w: %v", err, lastErr)
+			return nil, sanitizedHTTPError(ctx, lastErr)
 		}
 	}
 	return nil, lastErr
+}
+
+func sanitizedHTTPError(ctx context.Context, fallback error) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return errHTTPTimeout
+	}
+	return fallback
 }
 
 func waitForRetry(ctx context.Context, delay time.Duration) error {

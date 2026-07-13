@@ -16,7 +16,7 @@ namespace ClashSpeedTestGUI.UiFixtures
     {
         private const string FixtureRootEnvironment =
             "CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT";
-        private const int SpeedProtocolVersion = 3;
+        private const int SpeedProtocolVersion = 4;
         private const int RegionProtocolVersion = 2;
 
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
@@ -442,6 +442,8 @@ namespace ClashSpeedTestGUI.UiFixtures
             double packetLoss = node == NodeA ? 0D : node == NodeB ? 1.5D : 100D;
             bool downloadTested = usable && mode != "fast";
             bool uploadTested = usable && mode == "full";
+            bool downloadComplete = downloadTested;
+            bool uploadComplete = uploadTested;
             double downloadBytes = !downloadTested ? 0D
                 : node == NodeA ? 8D * 1024D * 1024D : 12D * 1024D * 1024D;
             double uploadBytes = !uploadTested ? 0D
@@ -482,7 +484,9 @@ namespace ClashSpeedTestGUI.UiFixtures
                 "download_bytes_per_second", downloadBytes,
                 "upload_bytes_per_second", uploadBytes,
                 "download_tested", downloadTested,
-                "upload_tested", uploadTested);
+                "upload_tested", uploadTested,
+                "download_complete", downloadComplete,
+                "upload_complete", uploadComplete);
             return Dictionary(
                 "id", node.Id,
                 "cells", cells.ToArray(),
@@ -498,13 +502,13 @@ namespace ClashSpeedTestGUI.UiFixtures
             {
                 return new[]
                 {
-                    "序号", "节点名称", "类型", "延迟", "抖动", "丢包率",
+                    "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率",
                     "下载速度", "上传速度"
                 };
             }
             return new[]
             {
-                "序号", "节点名称", "类型", "延迟", "抖动", "丢包率", "下载速度"
+                "序号", "节点名称", "类型", "延迟", "抖动", "HTTP 探测失败率", "下载速度"
             };
         }
 

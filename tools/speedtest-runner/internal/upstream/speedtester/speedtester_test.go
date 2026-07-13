@@ -1,12 +1,20 @@
 package speedtester
 
 import (
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/metacubex/mihomo/adapter"
+	"github.com/metacubex/mihomo/adapter/outbound"
 )
 
 func TestTransferSummaryAdd(t *testing.T) {
@@ -39,11 +47,11 @@ func TestTransferSummaryAdd(t *testing.T) {
 	if summary.totalBytes != 150 {
 		t.Fatalf("expected totalBytes to be 150, got %d", summary.totalBytes)
 	}
-	size, duration, speed, transferError := applyTransferSummary(summary, 2*time.Second)
+	size, duration, speed, transferError, complete := applyTransferSummary(summary, 2*time.Second, 3)
 	if transferError == "" {
 		t.Fatal("an explicit connection error must still fail the transfer")
 	}
-	if size != 150 || duration != 2*time.Second || speed != 0 {
+	if size != 150 || duration != 2*time.Second || speed != 75 || complete {
 		t.Fatalf("unexpected failed transfer summary: size=%v duration=%v speed=%v", size, duration, speed)
 	}
 }
@@ -53,14 +61,14 @@ func TestTransferSummaryUsesBatchWallClockDuration(t *testing.T) {
 	summary.add(&downloadResult{bytes: 100, duration: time.Second})
 	summary.add(&downloadResult{bytes: 100, duration: 4 * time.Second})
 
-	size, duration, speed, transferError := applyTransferSummary(summary, 4*time.Second)
+	size, duration, speed, transferError, complete := applyTransferSummary(summary, 4*time.Second, 2)
 	if transferError != "" {
 		t.Fatalf("unexpected transfer error: %s", transferError)
 	}
 	if size != 200 || duration != 4*time.Second {
 		t.Fatalf("unexpected transfer totals: size=%v duration=%v", size, duration)
 	}
-	if speed != 50 {
+	if speed != 50 || !complete {
 		t.Fatalf("speed must use batch wall-clock duration: got %v, want 50", speed)
 	}
 }
@@ -97,7 +105,7 @@ func TestConsumeDownloadResponseEnforcesRangeAndSize(t *testing.T) {
 		{name: "full response is capped", status: http.StatusOK,
 			body: "abcdefghij", wantBytes: 4},
 		{name: "short full response", status: http.StatusOK,
-			body: "ab", wantError: "shorter than requested"},
+			body: "ab", wantBytes: 2, wantError: "shorter than requested"},
 		{name: "missing content range", status: http.StatusPartialContent,
 			body: "abcd", wantError: "Content-Range"},
 		{name: "wrong content range", status: http.StatusPartialContent,
@@ -119,6 +127,9 @@ func TestConsumeDownloadResponseEnforcesRangeAndSize(t *testing.T) {
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) {
 					t.Fatalf("expected error containing %q, got %v", test.wantError, err)
+				}
+				if got != test.wantBytes {
+					t.Fatalf("read bytes=%d, want %d on error", got, test.wantBytes)
 				}
 				return
 			}
@@ -152,11 +163,11 @@ func TestResultFormatErrors(t *testing.T) {
 
 	result.DownloadSpeed = 1024
 	result.UploadSpeed = 2048
-	if result.FormatDownloadSpeed() != result.DownloadError {
-		t.Fatalf("expected download speed to prefer error string, got %q", result.FormatDownloadSpeed())
+	if result.FormatDownloadSpeed() == result.DownloadError {
+		t.Fatalf("partial download speed must remain visible, got %q", result.FormatDownloadSpeed())
 	}
-	if result.FormatUploadSpeed() != result.UploadError {
-		t.Fatalf("expected upload speed to prefer error string, got %q", result.FormatUploadSpeed())
+	if result.FormatUploadSpeed() == result.UploadError {
+		t.Fatalf("partial upload speed must remain visible, got %q", result.FormatUploadSpeed())
 	}
 	if result.FormatDownloadSpeedValue() == result.DownloadError {
 		t.Fatalf("expected download speed value to ignore error string")
@@ -210,5 +221,231 @@ func TestStringMapValueRequiresString(t *testing.T) {
 	}
 	if _, ok := stringMapValue(nil, "server"); ok {
 		t.Fatal("nil map must not return a value")
+	}
+}
+
+func TestPrepareProviderProxyConfigsExcludeTypeSkipsMissingType(t *testing.T) {
+	configs, err := prepareProviderProxyConfigs([]map[string]any{
+		{"name": "missing-type", "server": "missing.example.com"},
+		{"name": "keep", "type": "trojan", "server": "keep.example.com"},
+	}, map[string]any{"exclude-type": "ss"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(configs) != 1 {
+		t.Fatalf("prepared configs=%d, want 1", len(configs))
+	}
+	if name, _ := stringMapValue(configs[0], "name"); name != "keep" {
+		t.Fatalf("prepared proxy=%q, want keep", name)
+	}
+}
+
+func TestLoadProxiesFetchesHTTPProviderOnceAndMapsFilteredOverride(t *testing.T) {
+	var requests atomic.Int32
+	providerServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		_, _ = io.WriteString(w, `proxies:
+  - name: drop-node
+    type: trojan
+    server: drop.example.com
+    port: 443
+    password: drop-password
+    sni: drop.example.com
+  - name: keep-node
+    type: trojan
+    server: keep.example.com
+    port: 443
+    password: keep-password
+    sni: keep.example.com
+`)
+	}))
+	defer providerServer.Close()
+
+	configBody := fmt.Sprintf(`proxy-providers:
+  remote:
+    type: http
+    url: %q
+    filter: "^keep-node$"
+    override:
+      additional-prefix: "provider-"
+      skip-cert-verify: true
+proxies: []
+`, providerServer.URL)
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	if err := os.WriteFile(configPath, []byte(configBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tester, err := New(&Config{
+		ConfigPaths: configPath,
+		FilterRegex: ".*",
+		ServerURL:   "https://example.com/file.bin",
+		Mode:        SpeedModeFast,
+		Timeout:     2 * time.Second,
+		Concurrent:  1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies, err := tester.LoadProxies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := requests.Load(); got != 1 {
+		t.Fatalf("provider URL requests=%d, want exactly 1", got)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("loaded proxies=%d, want 1: %#v", len(proxies), proxies)
+	}
+	loaded := proxies["[remote] provider-keep-node"]
+	if loaded == nil {
+		t.Fatalf("filtered and renamed provider proxy is missing: %#v", proxies)
+	}
+	if got, _ := stringMapValue(loaded.Config, "server"); got != "keep.example.com" {
+		t.Fatalf("provider config mapped server=%q, want keep.example.com", got)
+	}
+	if got, _ := stringMapValue(loaded.Config, "name"); got != "[remote] provider-keep-node" {
+		t.Fatalf("final provider config name=%q, want prefixed loaded name", got)
+	}
+	if skipVerify, ok := loaded.Config["skip-cert-verify"].(bool); !ok || !skipVerify {
+		t.Fatalf("provider connection override was not preserved: %#v", loaded.Config["skip-cert-verify"])
+	}
+	if addr := loaded.Addr(); !strings.Contains(addr, "keep.example.com") {
+		t.Fatalf("loaded proxy points at wrong server: %q", addr)
+	}
+}
+
+func TestBaseServerFullModeEndToEnd(t *testing.T) {
+	var probeRequests atomic.Int32
+	var downloadRequests atomic.Int32
+	var uploadRequests atomic.Int32
+	var uploadedBytes atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/__down":
+			size, err := strconv.Atoi(r.URL.Query().Get("bytes"))
+			if err != nil || size <= 0 {
+				http.Error(w, "invalid size", http.StatusBadRequest)
+				return
+			}
+			if r.Header.Get("Accept-Encoding") != "identity" {
+				http.Error(w, "compressed transfer is not allowed", http.StatusBadRequest)
+				return
+			}
+			if size == 1 {
+				probeRequests.Add(1)
+			} else {
+				downloadRequests.Add(1)
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(make([]byte, size))
+		case "/__up":
+			uploadRequests.Add(1)
+			if r.ContentLength <= 0 {
+				http.Error(w, "content length is required", http.StatusLengthRequired)
+				return
+			}
+			body, err := io.ReadAll(r.Body)
+			if err != nil || int64(len(body)) != r.ContentLength {
+				http.Error(w, "incomplete upload", http.StatusBadRequest)
+				return
+			}
+			uploadedBytes.Add(int64(len(body)))
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	tester, err := New(&Config{
+		ServerURL:     server.URL,
+		Mode:          SpeedModeFull,
+		DownloadSize:  32 * 1024,
+		UploadSize:    16 * 1024,
+		Timeout:       2 * time.Second,
+		Concurrent:    2,
+		OutputPath:    "result.yaml",
+		MaxPacketLoss: 100,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := &CProxy{
+		Proxy:  adapter.NewProxy(outbound.NewDirect()),
+		Config: map[string]any{"name": "direct-test", "type": "direct", "server": "127.0.0.1"},
+	}
+	result := tester.ProbeProxy("direct-test", proxy)
+	if result.Latency <= 0 || result.PacketLoss != 0 {
+		t.Fatalf("base-server probe failed: latency=%v failure-rate=%v", result.Latency, result.PacketLoss)
+	}
+	if !tester.ShouldTestTransfers(result) {
+		t.Fatal("reachable full-mode node must enter transfer phase")
+	}
+	tester.TestTransfers(result, proxy)
+	if !result.DownloadTested || !result.DownloadComplete || result.DownloadSpeed <= 0 || result.DownloadError != "" {
+		t.Fatalf("download did not complete: %#v", result)
+	}
+	if !result.UploadTested || !result.UploadComplete || result.UploadSpeed <= 0 || result.UploadError != "" {
+		t.Fatalf("upload did not complete: %#v", result)
+	}
+	if probeRequests.Load() != latencyWarmupRequests+latencyMeasuredRequests {
+		t.Fatalf("probe requests=%d, want %d", probeRequests.Load(), latencyWarmupRequests+latencyMeasuredRequests)
+	}
+	if downloadRequests.Load() != 2 || uploadRequests.Load() != 2 {
+		t.Fatalf("transfer requests: download=%d upload=%d", downloadRequests.Load(), uploadRequests.Load())
+	}
+	if uploadedBytes.Load() != 16*1024 {
+		t.Fatalf("uploaded bytes=%d, want %d", uploadedBytes.Load(), 16*1024)
+	}
+}
+
+func TestLatencyProbeRejectsHTTPFailure(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "unavailable", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+	tester, err := New(&Config{
+		ServerURL: server.URL, Mode: SpeedModeFast, Timeout: time.Second, Concurrent: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxy := &CProxy{Proxy: adapter.NewProxy(outbound.NewDirect()), Config: map[string]any{}}
+	result := tester.ProbeProxy("failure", proxy)
+	if result.Latency != 0 || result.PacketLoss != 100 {
+		t.Fatalf("HTTP 503 must be a failed probe: latency=%v rate=%v", result.Latency, result.PacketLoss)
+	}
+}
+
+func TestLatencyStatsUseMedianAndMeasuredDenominator(t *testing.T) {
+	result := calculateLatencyStats([]time.Duration{
+		10 * time.Millisecond, 12 * time.Millisecond, 200 * time.Millisecond, 11 * time.Millisecond,
+	}, 1, 5)
+	if result.latency != 11500*time.Microsecond {
+		t.Fatalf("median latency=%v, want 11.5ms", result.latency)
+	}
+	if result.packetLoss != 20 {
+		t.Fatalf("failure rate=%v, want 20", result.packetLoss)
+	}
+}
+
+func TestSplitTransferSizesPreservesTotalAndLimit(t *testing.T) {
+	chunks := splitTransferSizes(10, 4)
+	if len(chunks) != 4 {
+		t.Fatalf("chunk count=%d, want 4", len(chunks))
+	}
+	total := 0
+	for _, chunk := range chunks {
+		if chunk <= 0 {
+			t.Fatalf("chunk must be positive: %v", chunks)
+		}
+		total += chunk
+	}
+	if total != 10 {
+		t.Fatalf("chunk total=%d, want 10", total)
+	}
+	if tiny := splitTransferSizes(2, 4); len(tiny) != 2 || tiny[0] != 1 || tiny[1] != 1 {
+		t.Fatalf("tiny transfer split=%v", tiny)
 	}
 }

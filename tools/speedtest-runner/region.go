@@ -433,7 +433,7 @@ func runRegionQueryContext(ctx context.Context, configPath, requestPath string, 
 
 	tester, err := speedtester.New(&speedtester.Config{
 		ConfigPaths: configPath, FilterRegex: ".+", ServerURL: "https://example.invalid/",
-		Timeout: regionProviderTimeout, Concurrent: 1,
+		Timeout: regionProviderTimeout, Concurrent: 1, Mode: speedtester.SpeedModeFast,
 	})
 	if err != nil {
 		return err

@@ -2,12 +2,17 @@ package main
 
 import (
 	"encoding/base64"
+	"encoding/json"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestParseClashYAML(t *testing.T) {
@@ -33,6 +38,62 @@ func TestParseBase64URIList(t *testing.T) {
 	}
 	if result.format != "base64-or-uri-list" || result.proxies != 2 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestParseSupportedURIFormats(t *testing.T) {
+	vmessJSON, err := json.Marshal(map[string]any{
+		"v": "2", "ps": "vmess", "add": "example.com", "port": "443",
+		"id": "11111111-1111-1111-1111-111111111111", "aid": "0",
+		"net": "tcp", "type": "none", "host": "", "path": "", "tls": "",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ssCredential := base64.RawURLEncoding.EncodeToString([]byte("aes-128-gcm:password"))
+	ssrPassword := base64.RawURLEncoding.EncodeToString([]byte("password"))
+	ssrRemark := base64.RawURLEncoding.EncodeToString([]byte("ssr"))
+	ssrBody := "example.com:443:auth_sha1_v4:aes-256-cfb:tls1.2_ticket_auth:" +
+		ssrPassword + "/?remarks=" + ssrRemark
+	proxyCredential := base64.StdEncoding.EncodeToString([]byte("user:password"))
+
+	tests := []struct {
+		name      string
+		uri       string
+		proxyType string
+	}{
+		{"vless", "vless://00000000-0000-0000-0000-000000000000@example.com:443?security=tls&type=tcp#vless", "vless"},
+		{"vmess", "vmess://" + base64.StdEncoding.EncodeToString(vmessJSON), "vmess"},
+		{"trojan", "trojan://password@example.com:443?security=tls#trojan", "trojan"},
+		{"shadowsocks", "ss://" + ssCredential + "@example.com:443#ss", "ss"},
+		{"shadowsocksr", "ssr://" + base64.RawURLEncoding.EncodeToString([]byte(ssrBody)), "ssr"},
+		{"hysteria", "hysteria://example.com:443?auth=password&peer=example.com&upmbps=10&downmbps=20#hysteria", "hysteria"},
+		{"hysteria2", "hysteria2://password@example.com:443?sni=example.com#hysteria2", "hysteria2"},
+		{"tuic", "tuic://22222222-2222-2222-2222-222222222222:password@example.com:443?sni=example.com#tuic", "tuic"},
+		{"anytls", "anytls://password@example.com:443?sni=example.com#anytls", "anytls"},
+		{"http", "http://" + proxyCredential + "@example.com:8080#http", "http"},
+		{"socks5", "socks5://" + proxyCredential + "@example.com:1080#socks5", "socks5"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := parseSubscription([]byte(test.uri))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.format != "base64-or-uri-list" || result.proxies != 1 {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+
+			var config rawConfig
+			if err := yaml.Unmarshal(result.body, &config); err != nil {
+				t.Fatal(err)
+			}
+			if got := config.Proxies[0]["type"]; got != test.proxyType {
+				t.Fatalf("expected proxy type %q, got %#v", test.proxyType, got)
+			}
+		})
 	}
 }
 
@@ -82,6 +143,120 @@ func TestReadInputRetriesTransientEOF(t *testing.T) {
 	}
 }
 
+func TestReadHTTPInputAcceptsSizeLimitAndRejectsOneByteMore(t *testing.T) {
+	var oversizedAttempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		size := int64(maxHTTPInputBytes)
+		if r.URL.Path == "/oversized" {
+			atomic.AddInt32(&oversizedAttempts, 1)
+			size++
+		}
+		_, _ = io.CopyN(w, repeatedByteReader('x'), size)
+	}))
+	defer server.Close()
+
+	body, err := readHTTPInput(server.URL+"/boundary", defaultUserAgent, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(body) != maxHTTPInputBytes {
+		t.Fatalf("expected %d bytes, got %d", maxHTTPInputBytes, len(body))
+	}
+
+	body, err = readHTTPInput(server.URL+"/oversized", defaultUserAgent, 5*time.Second)
+	if !errors.Is(err, errHTTPInputTooLarge) {
+		t.Fatalf("expected size-limit error, got %v", err)
+	}
+	if body != nil {
+		t.Fatalf("oversized response returned %d bytes", len(body))
+	}
+	if got := atomic.LoadInt32(&oversizedAttempts); got != 1 {
+		t.Fatalf("oversized response must not be retried, got %d attempts", got)
+	}
+}
+
+func TestReadHTTPInputRetriesTransientStatuses(t *testing.T) {
+	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var attempts int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				current := atomic.AddInt32(&attempts, 1)
+				if current < maxHTTPAttempts {
+					http.Error(w, "temporary failure", status)
+					return
+				}
+				_, _ = w.Write([]byte("recovered"))
+			}))
+			defer server.Close()
+
+			body, err := readHTTPInput(server.URL, defaultUserAgent, 3*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(body) != "recovered" {
+				t.Fatalf("unexpected body: %q", body)
+			}
+			if got := atomic.LoadInt32(&attempts); got != maxHTTPAttempts {
+				t.Fatalf("expected %d attempts, got %d", maxHTTPAttempts, got)
+			}
+		})
+	}
+}
+
+func TestReadHTTPInputDoesNotRetryPermanentStatus(t *testing.T) {
+	var attempts int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attempts, 1)
+		http.Error(w, "subscription-body-secret", http.StatusUnauthorized)
+	}))
+	defer server.Close()
+
+	input := server.URL + "/subscription?token=url-token-secret"
+	_, err := readHTTPInput(input, defaultUserAgent, time.Second)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 401") {
+		t.Fatalf("expected HTTP 401 error, got %v", err)
+	}
+	if got := atomic.LoadInt32(&attempts); got != 1 {
+		t.Fatalf("permanent status must not be retried, got %d attempts", got)
+	}
+	assertErrorRedacted(t, err, input, "url-token-secret", "subscription-body-secret")
+}
+
+func TestReadHTTPInputTimeoutIsRedacted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer server.Close()
+
+	input := server.URL + "/subscription?token=timeout-token-secret"
+	_, err := readHTTPInput(input, defaultUserAgent, 50*time.Millisecond)
+	if !errors.Is(err, errHTTPTimeout) {
+		t.Fatalf("expected timeout error, got %v", err)
+	}
+	assertErrorRedacted(t, err, input, "timeout-token-secret")
+}
+
+func TestReadHTTPInputNetworkErrorIsRedacted(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	input := server.URL + "/subscription?token=network-token-secret"
+	server.Close()
+
+	_, err := readHTTPInput(input, defaultUserAgent, 2*time.Second)
+	if !errors.Is(err, errHTTPNetwork) {
+		t.Fatalf("expected network error, got %v", err)
+	}
+	assertErrorRedacted(t, err, input, "network-token-secret")
+}
+
+func TestReadHTTPInputInvalidURLIsRedacted(t *testing.T) {
+	input := "http://[::1/subscription?token=invalid-token-secret"
+	_, err := readHTTPInput(input, defaultUserAgent, time.Second)
+	if !errors.Is(err, errInvalidSubscriptionURL) {
+		t.Fatalf("expected invalid URL error, got %v", err)
+	}
+	assertErrorRedacted(t, err, input, "invalid-token-secret")
+}
+
 func TestParseThousandNodeLines(t *testing.T) {
 	lines := make([]string, 1000)
 	for i := range lines {
@@ -110,5 +285,24 @@ func TestWithoutMetaFlag(t *testing.T) {
 	got := withoutMetaFlag(input)
 	if got != "https://example.com/sub?token=abc" {
 		t.Fatalf("unexpected URL: %s", got)
+	}
+}
+
+type repeatedByteReader byte
+
+func (r repeatedByteReader) Read(buffer []byte) (int, error) {
+	for i := range buffer {
+		buffer[i] = byte(r)
+	}
+	return len(buffer), nil
+}
+
+func assertErrorRedacted(t *testing.T, err error, secrets ...string) {
+	t.Helper()
+	message := err.Error()
+	for _, secret := range secrets {
+		if strings.Contains(message, secret) {
+			t.Fatalf("error leaked sensitive input %q: %s", secret, message)
+		}
 	}
 }

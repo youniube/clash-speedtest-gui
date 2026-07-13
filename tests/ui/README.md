@@ -65,7 +65,7 @@ UI 自动化启动 GUI 时，还应把 `TEMP` 和 `TMP` 指向沙箱内目录，
 
 ## 固定测速数据
 
-测速协议始终是严格 v3，支持 GUI 的 `fast`、`download` 和 `full` 三种表头。
+测速协议始终是严格 v4，支持 GUI 的 `fast`、`download` 和 `full` 三种表头；吞吐表头使用“HTTP 探测失败率”，不再误称“丢包率”。每个结果除原始速度和 `download_tested` / `upload_tested` 外，还会携带 `download_complete` / `upload_complete`：`tested` 表示已经启动对应传输，`complete` 表示计划传输全部完成。
 
 | 稳定 ID | 名称 | 类型 | 延迟 | `usable` | 导出 |
 |---|---|---|---:|---|---|
@@ -75,7 +75,7 @@ UI 自动化启动 GUI 时，还应把 `TEMP` 和 `TMP` 指向沙箱内目录，
 
 正常测速输出顺序为：
 
-1. `@protocol\t3`
+1. `@protocol\t4`
 2. 当前模式的固定表头
 3. `@nodes\t3`
 4. 三个完整 `@nodejson`
@@ -131,7 +131,7 @@ speedtest-runner.exe -c <final.yaml> -region-query <request.json>
 
 ## FlaUI 操作级回归
 
-根目录的默认 `test-all.ps1` 保持无桌面干扰。需要覆盖真实鼠标操作和弹窗视觉层时执行：
+根目录的 `test-all.ps1` 默认先构建当前源码，但保持无桌面干扰；只有明确要复核现有 EXE 时才传入 `-SkipBuild`。需要覆盖真实鼠标操作和弹窗视觉层时执行：
 
 ```powershell
 .\test-all.ps1 -IncludeWinFormsUI
@@ -143,6 +143,6 @@ speedtest-runner.exe -c <final.yaml> -region-query <request.json>
 .\tests\ui\test-winforms-ui.ps1
 ```
 
-测试通过稳定 Automation ID 驱动主窗口，并处理 WinForms 原生完成、保存和删除确认弹窗；实际完成“三节点测速 → 重命名 A → 删除 B → 校验 YAML”。结果表和右键菜单使用窗口内相对坐标定位，以避开 Windows 10 上 FlaUI 高层 `DataGridView` 行枚举可能阻塞的问题。
+测试通过稳定 Automation ID 驱动主窗口，并处理 WinForms 原生完成、失败、保存和删除确认弹窗；实际覆盖 `F5` 启动、运行态控件锁定、`Esc` 停止且不提交输出、状态/协议筛选、延迟排序、`F6` 地区查询、地区取消回滚、成功整批提交、畸形协议回滚，以及最后的重命名 A、删除 B 和 YAML 复核。结果表和右键菜单使用窗口内相对坐标定位，以避开 Windows 10 上 FlaUI 高层 `DataGridView` 行枚举可能阻塞的问题。
 
 截图优先调用 `PrintWindow(PW_RENDERFULLCONTENT)`，失败或得到空白图像时回退到屏幕区域 `BitBlt`，不依赖会报 `SetIsBorderRequired 0x80004002` 的 Computer Use 捕获链。首次执行会下载并校验固定版本 FlaUI 包，缓存在 `%LOCALAPPDATA%\ClashSpeedTestGUI\test-tools\FlaUI\5.0.0\`；不会安装系统组件、注册快捷键或操作 PixPin。成功截图和日志位于 `tests\ui\artifacts\`，失败时同目录保留追踪和截图用于排查。
