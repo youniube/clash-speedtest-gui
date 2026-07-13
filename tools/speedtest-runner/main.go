@@ -105,7 +105,7 @@ type nodeManagementResult struct {
 func main() {
 	flag.Parse()
 	if *versionFlag {
-		fmt.Println("speedtest-runner version 1.7.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
+		fmt.Println("speedtest-runner version 2.0.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
 		return
 	}
 	if strings.TrimSpace(*listConfigPath) != "" {
