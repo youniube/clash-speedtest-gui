@@ -1,3 +1,7 @@
+param(
+    [switch] $IncludeWinFormsUI
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -29,6 +33,12 @@ Invoke-Step "GUI self-test" {
 
 Invoke-Step "UI fixture node-management contract" {
     & (Join-Path $root 'tests\ui\test-fixture-contract.ps1')
+}
+
+if ($IncludeWinFormsUI) {
+    Invoke-Step "FlaUI WinForms operation test" {
+        & (Join-Path $root 'tests\ui\test-winforms-ui.ps1')
+    }
 }
 
 Invoke-Step "subscription-parser go test" {

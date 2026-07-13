@@ -129,4 +129,20 @@ speedtest-runner.exe -c <final.yaml> -region-query <request.json>
 
 `-manage-config` 支持按稳定 ID 重命名和删除夹具导出的 A/B 节点，并会重写沙箱内 YAML、返回更新后的节点清单以及写入 `signals/manage-config-completed.json`。项目根目录的 `test-all.ps1` 会调用 `test-fixture-contract.ps1`，自动验证“测速导出 → 重命名 A → 删除 B → 重新读取”的完整相邻进程契约。
 
-当前 Windows 10 环境的窗口捕获接口会返回 `SetIsBorderRequired 0x80004002`，因此这条一键测试验证真实文件和进程协议，不宣称覆盖鼠标点击或弹窗视觉层。控件入口仍保留稳定的 Automation ID，待系统捕获能力可用时可继续执行操作级验证。
+## FlaUI 操作级回归
+
+根目录的默认 `test-all.ps1` 保持无桌面干扰。需要覆盖真实鼠标操作和弹窗视觉层时执行：
+
+```powershell
+.\test-all.ps1 -IncludeWinFormsUI
+```
+
+也可以只运行这部分：
+
+```powershell
+.\tests\ui\test-winforms-ui.ps1
+```
+
+测试通过稳定 Automation ID 驱动主窗口，并处理 WinForms 原生完成、保存和删除确认弹窗；实际完成“三节点测速 → 重命名 A → 删除 B → 校验 YAML”。结果表和右键菜单使用窗口内相对坐标定位，以避开 Windows 10 上 FlaUI 高层 `DataGridView` 行枚举可能阻塞的问题。
+
+截图优先调用 `PrintWindow(PW_RENDERFULLCONTENT)`，失败或得到空白图像时回退到屏幕区域 `BitBlt`，不依赖会报 `SetIsBorderRequired 0x80004002` 的 Computer Use 捕获链。首次执行会下载并校验固定版本 FlaUI 包，缓存在 `%LOCALAPPDATA%\ClashSpeedTestGUI\test-tools\FlaUI\5.0.0\`；不会安装系统组件、注册快捷键或操作 PixPin。成功截图和日志位于 `tests\ui\artifacts\`，失败时同目录保留追踪和截图用于排查。

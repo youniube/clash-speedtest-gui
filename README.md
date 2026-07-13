@@ -63,6 +63,14 @@ GUI 只需要以下三个文件放在同一目录：
 .\test-all.ps1
 ```
 
+默认回归不会操作桌面。需要同时验证真实 WinForms 点击、测速、重命名、删除和最终截图时，执行：
+
+```powershell
+.\test-all.ps1 -IncludeWinFormsUI
+```
+
+操作级回归会打开一个隔离的测试 GUI；运行期间不要手动操作该窗口。首次执行会下载固定版本且校验 SHA-256 的 FlaUI 依赖到 `%LOCALAPPDATA%\ClashSpeedTestGUI\test-tools\FlaUI\5.0.0\`，不会安装系统组件，也不会注册快捷键或调用 PixPin。成功截图保存到 `tests\ui\artifacts\last-success.png`。
+
 ## 本地敏感配置
 
 真实订阅配置可能包含服务器地址、账号或密钥，不应放在源码和发布目录中。项目初始化 Git 时已忽略根目录的 `cs.yaml`、`wa.yaml`、`filtered.yaml` 和所有 EXE；原有 `cs.yaml`、`wa.yaml` 已保持内容不变并迁移到：
