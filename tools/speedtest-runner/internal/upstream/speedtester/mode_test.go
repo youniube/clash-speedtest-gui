@@ -20,9 +20,9 @@ func TestParseSpeedMode(t *testing.T) {
 			expected: SpeedModeDownload,
 		},
 		{
-			name:     "full",
-			input:    "full",
-			expected: SpeedModeFull,
+			name:      "removed full mode",
+			input:     "full",
+			wantError: true,
 		},
 		{
 			name:      "invalid",
@@ -56,18 +56,5 @@ func TestSpeedModeHelpers(t *testing.T) {
 	}
 	if SpeedModeDownload.IsFast() {
 		t.Fatalf("expected download mode to be non-fast")
-	}
-	if SpeedModeFull.IsFast() {
-		t.Fatalf("expected full mode to be non-fast")
-	}
-
-	if SpeedModeFast.UploadEnabled() {
-		t.Fatalf("expected fast mode to disable upload")
-	}
-	if SpeedModeDownload.UploadEnabled() {
-		t.Fatalf("expected download mode to disable upload")
-	}
-	if !SpeedModeFull.UploadEnabled() {
-		t.Fatalf("expected full mode to enable upload")
 	}
 }
