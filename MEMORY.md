@@ -106,3 +106,4 @@
 - 2026-07-13 测速调度正式改为“两阶段”：节点间只并发执行 1 次预热加 5 次正式低流量 HTTP 探测，通过初筛后逐节点执行吞吐，同一节点内部保留多连接；延迟采用正式成功样本中位数，“丢包率”统一澄清为 HTTP 探测失败率。传输结果协议升级为 v4，以 `tested` 和 `complete` 区分未启动、部分采样与完整传输；部分速度可以展示，但未完整传完的节点不得导出。
 - 2026-07-13 发布修复目标合并为 `v1.1.0`：已解决无路径测速服务、订阅 32MiB 静默截断、逗号输入、首次默认值、动态协议筛选、结构化重命名和 provider 双拉取/错配；`test-all.ps1` 默认从当前源码重建后再回归。最终无缓存 Go 测试、`go vet`、严格协议夹具和真实 WinForms 操作回归均通过，操作截图由 `PrintWindow(PW_RENDERFULLCONTENT)` 成功捕获。
 - 2026-07-13 `v1.1.0` 修复已推送到私有仓库分支 `agent/v1.1.0-speedtest-reliability`，草稿 PR 位于 `github.com/youniube/clash-speedtest-gui/pull/1`；合并到 `main` 后再创建正式标签与 Windows x86_64 Release，避免标签指向未审阅分支。
+- 2026-07-13 PR #1 已 squash 合并到 `main` 提交 `009a5ca`，正式 `v1.1.0` Release 位于 `github.com/youniube/clash-speedtest-gui/releases/tag/v1.1.0`；发布包从该提交重建并通过完整 WinForms/Go 回归，远端下载后 SHA-256 复核为 `b945066062bdb4916a929f2c20abc0b8ae9eb3cd48d52a6ff1f72159e7dbac79`。
