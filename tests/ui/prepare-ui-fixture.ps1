@@ -1,6 +1,17 @@
+param(
+    [string] $GuiPath
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+if ([string]::IsNullOrWhiteSpace($GuiPath)) {
+    $GuiPath = Join-Path $root 'Clash-SpeedTest-GUI.exe'
+}
+$GuiPath = [IO.Path]::GetFullPath($GuiPath)
+if (-not (Test-Path -LiteralPath $GuiPath)) {
+    throw "UI fixture GUI was not found: $GuiPath"
+}
 $compiler = 'C:\Windows\Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 if (-not (Test-Path -LiteralPath $compiler)) {
     $compiler = 'C:\Windows\Microsoft.NET\Framework\v4.0.30319\csc.exe'
@@ -19,7 +30,7 @@ $temporary = Join-Path $sandbox 'temp'
 New-Item -ItemType Directory -Force -Path `
     $sandbox, $control, $signals, $work, $profile, $temporary | Out-Null
 
-Copy-Item -LiteralPath (Join-Path $root 'Clash-SpeedTest-GUI.exe') `
+Copy-Item -LiteralPath $GuiPath `
     -Destination (Join-Path $sandbox 'Clash-SpeedTest-GUI.exe')
 
 $fixture = Join-Path $sandbox 'speedtest-runner.exe'

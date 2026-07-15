@@ -19,9 +19,9 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyVersion("2.0.0.0")]
-[assembly: AssemblyFileVersion("2.0.0.0")]
-[assembly: AssemblyInformationalVersion("2.0.0")]
+[assembly: AssemblyVersion("2.1.0.0")]
+[assembly: AssemblyFileVersion("2.1.0.0")]
+[assembly: AssemblyInformationalVersion("2.1.0")]
 
 namespace ClashSpeedTestGUI
 {
@@ -1588,11 +1588,6 @@ namespace ClashSpeedTestGUI
         {
             "序号", "节点名称", "类型", "HTTP 延迟", "下载速度", "出口地区", "状态"
         };
-        public static readonly object[] RegionFilterOptions =
-        {
-            "全部", "US 美国", "JP 日本", "HK 香港", "SG 新加坡", "TW 台湾"
-        };
-
         public static string MetricText(bool tested, string value)
         {
             return tested && !string.IsNullOrWhiteSpace(value) ? value : "未测试";
@@ -1633,6 +1628,47 @@ namespace ClashSpeedTestGUI
                 options.Add(protocol);
             }
             return options.ToArray();
+        }
+
+        public static object[] RegionFilterOptions(IEnumerable<NodeSnapshot> nodes)
+        {
+            List<object> options = new List<object> { "全部" };
+            IEnumerable<IGrouping<string, NodeSnapshot>> countries =
+                (nodes ?? Enumerable.Empty<NodeSnapshot>())
+                    .Where(delegate(NodeSnapshot node)
+                    {
+                        return node != null
+                            && string.Equals(node.RegionState, "成功", StringComparison.Ordinal)
+                            && IsCountryCode(node.RegionCountryCode);
+                    })
+                    .GroupBy(delegate(NodeSnapshot node)
+                    {
+                        return node.RegionCountryCode.Trim().ToUpperInvariant();
+                    }, StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(delegate(IGrouping<string, NodeSnapshot> group) { return group.Key; },
+                        StringComparer.OrdinalIgnoreCase);
+            foreach (IGrouping<string, NodeSnapshot> country in countries)
+            {
+                string name = country.Select(delegate(NodeSnapshot node)
+                    {
+                        return (node.RegionCountry ?? "").Trim();
+                    })
+                    .Where(delegate(string value) { return value.Length > 0; })
+                    .OrderBy(delegate(string value) { return value; }, StringComparer.Ordinal)
+                    .FirstOrDefault() ?? "";
+                options.Add(country.Key + (name.Length == 0 ? "" : " " + name));
+            }
+            return options.ToArray();
+        }
+
+        private static bool IsCountryCode(string value)
+        {
+            value = (value ?? "").Trim();
+            return value.Length == 2 && value.All(delegate(char character)
+            {
+                char upper = char.ToUpperInvariant(character);
+                return upper >= 'A' && upper <= 'Z';
+            });
         }
 
         private static string ProtocolDisplayName(string value)
@@ -1676,6 +1712,27 @@ namespace ClashSpeedTestGUI
         }
     }
 
+    internal static class NodeListSelection
+    {
+        public static List<DataGridViewRow> GetSelectedVisibleRows(DataGridView grid)
+        {
+            if (grid == null) return new List<DataGridViewRow>();
+            return grid.SelectedRows.Cast<DataGridViewRow>()
+                .Where(delegate(DataGridViewRow row) { return row.Visible && !row.IsNewRow; })
+                .ToList();
+        }
+
+        public static void SelectAllVisibleRows(DataGridView grid)
+        {
+            if (grid == null) return;
+            grid.ClearSelection();
+            foreach (DataGridViewRow row in grid.Rows)
+            {
+                if (row.Visible && !row.IsNewRow) row.Selected = true;
+            }
+        }
+    }
+
     internal static class NodeMetaFormatter
     {
         public static string Format(IEnumerable<NodeSnapshot> nodes)
@@ -1697,7 +1754,7 @@ namespace ClashSpeedTestGUI
     internal sealed class MainForm : Form
     {
         private static readonly UTF8Encoding StrictEventUtf8 = new UTF8Encoding(false, true);
-        private const int BasicOptionsHeight = 455;
+        private const int BasicOptionsHeight = 421;
         private const int ExpandedOptionsContentHeight = 635;
         private const int OptionsContentWidth = 1150;
         private const int MinimumResultGridHeight = 170;
@@ -1972,12 +2029,22 @@ namespace ClashSpeedTestGUI
         {
             if (e.Control && e.KeyCode == Keys.A)
             {
-                resultGrid.SelectAll();
+                bool previousSuppression = suppressStatisticsEvents;
+                suppressStatisticsEvents = true;
+                try
+                {
+                    NodeListSelection.SelectAllVisibleRows(resultGrid);
+                }
+                finally
+                {
+                    suppressStatisticsEvents = previousSuppression;
+                }
+                UpdateStatistics();
                 e.Handled = true;
                 e.SuppressKeyPress = true;
                 return;
             }
-            if (e.Control && e.KeyCode == Keys.C && resultGrid.SelectedRows.Count > 0)
+            if (e.Control && e.KeyCode == Keys.C && GetSelectedNodes().Count > 0)
             {
                 CopySelectedNodeUrls();
                 e.Handled = true;
@@ -2063,7 +2130,7 @@ namespace ClashSpeedTestGUI
 
         private List<NodeSnapshot> GetSelectedNodes()
         {
-            return resultGrid.SelectedRows.Cast<DataGridViewRow>()
+            return NodeListSelection.GetSelectedVisibleRows(resultGrid)
                 .OrderBy(delegate(DataGridViewRow row) { return row.Index; })
                 .Select(delegate(DataGridViewRow row) { return row.Tag as NodeSnapshot; })
                 .Where(delegate(NodeSnapshot node) { return node != null; })
@@ -2542,10 +2609,10 @@ namespace ClashSpeedTestGUI
                         token, username, outputPath, operation.Token);
                 }, operation.Token);
                 operation.Token.ThrowIfCancellationRequested();
-                SetStatus(detail + (upload.Created ? "；秘密 Gist 已创建" : "；Gist 已更新"));
-                MessageBox.Show(this, detail + (upload.Created
-                    ? "。\n\n秘密 Gist 已创建（不公开列出；任何拿到链接的人都能访问）：\n"
-                    : "。\n\nGist 已更新：\n") + upload.HtmlUrl,
+                SetStatus(detail + (upload.FileCreated ? "；Gist 文件链接已创建" : "；Gist 文件已更新"));
+                MessageBox.Show(this, detail + (upload.FileCreated
+                    ? "。\n\n已按输出文件名创建订阅链接：\n"
+                    : "。\n\n同名 Gist 文件已覆盖，订阅链接保持不变：\n") + upload.RawUrl,
                     "节点管理完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (OperationCanceledException)
@@ -2599,8 +2666,9 @@ namespace ClashSpeedTestGUI
             try
             {
                 regionFilterCombo.Items.Clear();
-                regionFilterCombo.Items.AddRange(NodeListPresentation.RegionFilterOptions);
+                regionFilterCombo.Items.Add("全部");
                 regionFilterCombo.SelectedIndex = 0;
+                regionFilterCombo.Enabled = false;
             }
             finally
             {
@@ -2656,23 +2724,12 @@ namespace ClashSpeedTestGUI
         {
             if (regionFilterCombo == null) return;
             string selected = GetFilterSelection(regionFilterCombo);
+            object[] options = NodeListPresentation.RegionFilterOptions(nodesById.Values);
             applyingNodeListFilters = true;
             try
             {
                 regionFilterCombo.Items.Clear();
-                regionFilterCombo.Items.AddRange(NodeListPresentation.RegionFilterOptions);
-                foreach (NodeSnapshot node in nodesById.Values
-                    .Where(delegate(NodeSnapshot value)
-                    {
-                        return value != null
-                            && string.Equals(value.RegionState, "成功", StringComparison.Ordinal)
-                            && !string.IsNullOrWhiteSpace(value.RegionCountryCode);
-                    })
-                    .OrderBy(delegate(NodeSnapshot value) { return value.RegionCountryCode; },
-                        StringComparer.OrdinalIgnoreCase))
-                {
-                    EnsureRegionFilterOption(node);
-                }
+                regionFilterCombo.Items.AddRange(options);
                 int selectedIndex = -1;
                 for (int index = 0; index < regionFilterCombo.Items.Count; index++)
                 {
@@ -2684,6 +2741,7 @@ namespace ClashSpeedTestGUI
                     }
                 }
                 regionFilterCombo.SelectedIndex = selectedIndex >= 0 ? selectedIndex : 0;
+                regionFilterCombo.Enabled = options.Length > 1;
             }
             finally
             {
@@ -2733,6 +2791,8 @@ namespace ClashSpeedTestGUI
         {
             if (applyingNodeListFilters || resultGrid == null) return;
             NodeListFilterCriteria criteria = CaptureNodeListFilter();
+            bool previousSuppression = suppressStatisticsEvents;
+            suppressStatisticsEvents = true;
             resultGrid.SuspendLayout();
             try
             {
@@ -2751,6 +2811,7 @@ namespace ClashSpeedTestGUI
             finally
             {
                 resultGrid.ResumeLayout();
+                suppressStatisticsEvents = previousSuppression;
             }
             ReindexVisibleRows();
             UpdateStatistics();
@@ -2781,8 +2842,7 @@ namespace ClashSpeedTestGUI
                 .Where(delegate(NodeSnapshot node) { return node != null; }).ToList();
             int visible = resultGrid.Rows.Cast<DataGridViewRow>()
                 .Count(delegate(DataGridViewRow row) { return row.Visible; });
-            int selected = resultGrid.SelectedRows.Cast<DataGridViewRow>()
-                .Count(delegate(DataGridViewRow row) { return row.Visible; });
+            int selected = NodeListSelection.GetSelectedVisibleRows(resultGrid).Count;
             int valid = nodes.Count(delegate(NodeSnapshot node)
                 { return string.Equals(node.State, "有效", StringComparison.Ordinal); });
             int failed = nodes.Count(delegate(NodeSnapshot node)
@@ -2814,26 +2874,20 @@ namespace ClashSpeedTestGUI
             configBrowse.Click += delegate { BrowseConfig(); };
             AddLabel(optionsPanel, "可填订阅/文件/节点；多个输入请每行一个（逗号属于内容）", 125, 92, 700);
 
-            AddLabel(optionsPanel, "节点筛选：", 15, 128, 85);
-            filterText = AddTextBox(optionsPanel, 100, 124, 380);
-            filterText.Name = "NodeFilterInput";
-            filterText.TabIndex = 2;
-            AddLabel(optionsPanel, "支持正则，例如：HK|香港；留空表示全部", 490, 128, 400);
-
-            AddLabel(optionsPanel, "延迟上限：", 15, 162, 85);
-            latencyNumber = AddNumber(optionsPanel, 100, 157, 110, 0, 600000, 0);
+            AddLabel(optionsPanel, "延迟上限：", 15, 128, 85);
+            latencyNumber = AddNumber(optionsPanel, 100, 123, 110, 0, 600000, 0);
             latencyNumber.Name = "LatencyLimitInput";
             latencyNumber.TabIndex = 3;
-            AddLabel(optionsPanel, "ms", 214, 162, 28);
-            AddLabel(optionsPanel, "下载下限：", 260, 162, 85);
-            downloadSpeedNumber = AddNumber(optionsPanel, 345, 157, 110, 0, 100000, 2);
+            AddLabel(optionsPanel, "ms", 214, 128, 28);
+            AddLabel(optionsPanel, "下载下限：", 260, 128, 85);
+            downloadSpeedNumber = AddNumber(optionsPanel, 345, 123, 110, 0, 100000, 2);
             downloadSpeedNumber.Name = "DownloadLimitInput";
             downloadSpeedNumber.TabIndex = 4;
-            AddLabel(optionsPanel, "MB/s", 460, 162, 50);
-            AddLabel(optionsPanel, "0 表示不限制", 525, 162, 130);
+            AddLabel(optionsPanel, "MB/s", 460, 128, 50);
+            AddLabel(optionsPanel, "0 表示不限制", 525, 128, 130);
 
-            AddLabel(optionsPanel, "输出文件：", 15, 196, 85);
-            outputText = AddTextBox(optionsPanel, 100, 192, 850);
+            AddLabel(optionsPanel, "输出文件：", 15, 162, 85);
+            outputText = AddTextBox(optionsPanel, 100, 158, 850);
             outputText.Name = "OutputPathInput";
             outputText.TabIndex = 5;
             outputText.TextChanged += delegate
@@ -2841,7 +2895,7 @@ namespace ClashSpeedTestGUI
                 UpdateOutputActionState();
                 UpdateRegionActionState();
             };
-            Button outputBrowse = AddButton(optionsPanel, "选择位置", 960, 191, 90);
+            Button outputBrowse = AddButton(optionsPanel, "选择位置", 960, 157, 90);
             outputBrowse.Name = "OutputBrowseButton";
             outputBrowse.TabIndex = 6;
             outputBrowse.Click += delegate { BrowseOutput(); };
@@ -2851,7 +2905,7 @@ namespace ClashSpeedTestGUI
                 Name = "RenameNodesCheckBox",
                 TabIndex = 7,
                 Text = "按真实出口地区重命名节点（例如：🇭🇰 香港 HK-01）",
-                Location = new Point(100, 229),
+                Location = new Point(100, 195),
                 AutoSize = true
             };
             optionsPanel.Controls.Add(renameCheck);
@@ -2861,24 +2915,24 @@ namespace ClashSpeedTestGUI
                 Name = "GistEnabledCheckBox",
                 TabIndex = 8,
                 Text = "测速成功后自动创建或更新秘密 GitHub Gist（不公开列出）",
-                Location = new Point(100, 260),
+                Location = new Point(100, 226),
                 AutoSize = true
             };
             gistCheck.CheckedChanged += delegate { UpdateGistControlState(); };
             optionsPanel.Controls.Add(gistCheck);
 
-            AddLabel(optionsPanel, "GitHub 用户名：", 100, 293, 100);
-            gistUsernameText = AddTextBox(optionsPanel, 200, 289, 475);
+            AddLabel(optionsPanel, "GitHub 用户名：", 100, 259, 100);
+            gistUsernameText = AddTextBox(optionsPanel, 200, 255, 475);
             gistUsernameText.Name = "GistUsernameInput";
             gistUsernameText.TabIndex = 9;
             gistUsernameText.Anchor = AnchorStyles.Top | AnchorStyles.Left;
 
-            AddLabel(optionsPanel, "Token：", 690, 293, 55);
-            gistTokenText = AddTextBox(optionsPanel, 745, 289, 205);
+            AddLabel(optionsPanel, "Token：", 690, 259, 55);
+            gistTokenText = AddTextBox(optionsPanel, 745, 255, 205);
             gistTokenText.Name = "GistTokenInput";
             gistTokenText.TabIndex = 10;
             gistTokenText.UseSystemPasswordChar = true;
-            tokenEyeButton = AddButton(optionsPanel, "\uD83D\uDC41", 960, 288, 42);
+            tokenEyeButton = AddButton(optionsPanel, "\uD83D\uDC41", 960, 254, 42);
             tokenEyeButton.Name = "TokenVisibilityButton";
             tokenEyeButton.TabIndex = 11;
             tokenEyeButton.Click += delegate
@@ -2886,7 +2940,7 @@ namespace ClashSpeedTestGUI
                 gistTokenText.UseSystemPasswordChar = !gistTokenText.UseSystemPasswordChar;
                 tokenEyeButton.BackColor = gistTokenText.UseSystemPasswordChar ? SystemColors.Control : Color.LightSteelBlue;
             };
-            Button clearTokenButton = AddButton(optionsPanel, "清除输入与凭据", 1008, 288, 117);
+            Button clearTokenButton = AddButton(optionsPanel, "清除输入与凭据", 1008, 254, 117);
             clearTokenButton.Name = "ClearTokenButton";
             clearTokenButton.TabIndex = 12;
             clearTokenButton.Click += delegate
@@ -2913,10 +2967,10 @@ namespace ClashSpeedTestGUI
 
             Label tokenWarning = AddLabel(optionsPanel,
                 "隐私提示：订阅/节点输入和 Token 会明文保存在本机 settings.json；秘密 Gist 的链接持有者仍可访问。",
-                100, 323, 900);
+                100, 289, 900);
             tokenWarning.ForeColor = Color.DarkOrange;
 
-            startButton = AddButton(optionsPanel, "开始测速", 100, 355, 110);
+            startButton = AddButton(optionsPanel, "开始测速", 100, 321, 110);
             startButton.Name = "StartSpeedTestButton";
             startButton.TabIndex = 13;
             startButton.BackColor = Color.FromArgb(45, 125, 210);
@@ -2924,13 +2978,13 @@ namespace ClashSpeedTestGUI
             startButton.FlatStyle = FlatStyle.Flat;
             startButton.Click += async delegate { await StartSpeedTestAsync(); };
 
-            stopButton = AddButton(optionsPanel, "停止", 220, 355, 90);
+            stopButton = AddButton(optionsPanel, "停止", 220, 321, 90);
             stopButton.Name = "StopTaskButton";
             stopButton.TabIndex = 14;
             stopButton.Enabled = false;
             stopButton.Click += delegate { StopSpeedTest(); };
 
-            Button saveSettingsButton = AddButton(optionsPanel, "保存设置", 320, 355, 100);
+            Button saveSettingsButton = AddButton(optionsPanel, "保存设置", 320, 321, 100);
             saveSettingsButton.Name = "SaveSettingsButton";
             saveSettingsButton.TabIndex = 15;
             saveSettingsButton.Click += delegate
@@ -2946,27 +3000,27 @@ namespace ClashSpeedTestGUI
                 }
             };
 
-            advancedButton = AddButton(optionsPanel, "展开高级设置 ▼", 440, 355, 150);
+            advancedButton = AddButton(optionsPanel, "展开高级设置 ▼", 440, 321, 150);
             advancedButton.Name = "AdvancedSettingsButton";
             advancedButton.TabIndex = 16;
             advancedButton.Click += delegate { ApplyAdvancedState(!advancedGroup.Visible); };
 
-            openOutputButton = AddButton(optionsPanel, "打开结果位置", 600, 355, 110);
+            openOutputButton = AddButton(optionsPanel, "打开结果位置", 600, 321, 110);
             openOutputButton.Name = "OpenOutputButton";
             openOutputButton.TabIndex = 17;
             openOutputButton.Click += delegate { OpenOutputLocation(); };
 
-            copyOutputButton = AddButton(optionsPanel, "复制结果路径", 720, 355, 110);
+            copyOutputButton = AddButton(optionsPanel, "复制结果路径", 720, 321, 110);
             copyOutputButton.Name = "CopyOutputPathButton";
             copyOutputButton.TabIndex = 18;
             copyOutputButton.Click += delegate { CopyOutputPath(); };
 
-            AddLabel(optionsPanel, "测速方案：", 845, 357, 75);
+            AddLabel(optionsPanel, "测速方案：", 845, 323, 75);
             presetCombo = new ComboBox
             {
                 Name = "SpeedPresetCombo",
                 TabIndex = 19,
-                Location = new Point(920, 355),
+                Location = new Point(920, 321),
                 Width = 145,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
@@ -2980,35 +3034,36 @@ namespace ClashSpeedTestGUI
             presetCombo.SelectedIndexChanged += delegate { ApplySelectedPreset(); };
             optionsPanel.Controls.Add(presetCombo);
 
-            presetHintLabel = AddLabel(optionsPanel, "", 600, 382, 465);
+            presetHintLabel = AddLabel(optionsPanel, "", 600, 348, 465);
             presetHintLabel.ForeColor = Color.DimGray;
 
-            AddLabel(optionsPanel, "列表筛选：", 15, 414, 85);
-            AddLabel(optionsPanel, "状态", 100, 414, 38);
-            statusFilterCombo = AddListFilterCombo(optionsPanel, 138, 409, 86,
+            AddLabel(optionsPanel, "列表筛选：", 15, 380, 85);
+            AddLabel(optionsPanel, "状态", 100, 380, 38);
+            statusFilterCombo = AddListFilterCombo(optionsPanel, 138, 375, 86,
                 new object[] { "全部", "有效", "失败" });
             statusFilterCombo.Name = "StatusFilter";
             statusFilterCombo.TabIndex = 20;
-            AddLabel(optionsPanel, "延迟", 235, 414, 38);
-            latencyFilterCombo = AddListFilterCombo(optionsPanel, 273, 409, 102,
+            AddLabel(optionsPanel, "延迟", 235, 380, 38);
+            latencyFilterCombo = AddListFilterCombo(optionsPanel, 273, 375, 102,
                 new object[] { "全部", "<100ms", "<300ms", "<500ms", "<1000ms" });
             latencyFilterCombo.Name = "LatencyFilter";
             latencyFilterCombo.TabIndex = 21;
-            AddLabel(optionsPanel, "协议", 386, 414, 38);
-            protocolFilterCombo = AddListFilterCombo(optionsPanel, 424, 409, 102,
+            AddLabel(optionsPanel, "协议", 386, 380, 38);
+            protocolFilterCombo = AddListFilterCombo(optionsPanel, 424, 375, 102,
                 new object[] { "全部" });
             protocolFilterCombo.Name = "ProtocolFilter";
             protocolFilterCombo.TabIndex = 22;
-            AddLabel(optionsPanel, "地区", 537, 414, 38);
-            regionFilterCombo = AddListFilterCombo(optionsPanel, 575, 409, 102,
-                NodeListPresentation.RegionFilterOptions);
+            AddLabel(optionsPanel, "地区", 537, 380, 38);
+            regionFilterCombo = AddListFilterCombo(optionsPanel, 575, 375, 102,
+                NodeListPresentation.RegionFilterOptions(null));
             regionFilterCombo.Name = "RegionFilter";
             regionFilterCombo.TabIndex = 23;
-            Button resetListFiltersButton = AddButton(optionsPanel, "重置", 690, 409, 66);
+            regionFilterCombo.Enabled = false;
+            Button resetListFiltersButton = AddButton(optionsPanel, "重置", 690, 375, 66);
             resetListFiltersButton.Name = "ResetFiltersButton";
             resetListFiltersButton.TabIndex = 24;
             resetListFiltersButton.Click += delegate { ResetNodeListFilters(); };
-            queryRegionButton = AddButton(optionsPanel, "查询有效节点出口地区", 770, 409, 205);
+            queryRegionButton = AddButton(optionsPanel, "查询有效节点出口地区", 770, 375, 205);
             queryRegionButton.Name = "QueryRegionsButton";
             queryRegionButton.TabIndex = 25;
             queryRegionButton.Enabled = false;
@@ -3028,7 +3083,7 @@ namespace ClashSpeedTestGUI
 
             taskConfigurationControls.AddRange(new Control[]
             {
-                configText, configBrowse, filterText, latencyNumber, downloadSpeedNumber,
+                configText, configBrowse, latencyNumber, downloadSpeedNumber,
                 outputText, outputBrowse, renameCheck, gistCheck, gistUsernameText,
                 gistTokenText, tokenEyeButton, clearTokenButton, saveSettingsButton, presetCombo
             });
@@ -3041,16 +3096,22 @@ namespace ClashSpeedTestGUI
                 Name = "AdvancedSettingsGroup",
                 TabIndex = 26,
                 Text = "高级设置",
-                Location = new Point(15, 445),
-                Size = new Size(1130, 170)
+                Location = new Point(15, 411),
+                Size = new Size(1130, 205)
             };
 
-            AddLabel(group, "测速模式：", 15, 29, 75);
+            AddLabel(group, "节点正则过滤：", 15, 29, 100);
+            filterText = AddTextBox(group, 115, 25, 400);
+            filterText.Name = "NodeFilterInput";
+            filterText.TabIndex = 0;
+            AddLabel(group, "支持正则，例如：HK|香港；留空表示全部", 525, 29, 400);
+
+            AddLabel(group, "测速模式：", 15, 63, 75);
             modeCombo = new ComboBox
             {
                 Name = "SpeedModeCombo",
-                TabIndex = 0,
-                Location = new Point(90, 25),
+                TabIndex = 1,
+                Location = new Point(90, 59),
                 Width = 120,
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
@@ -3062,56 +3123,56 @@ namespace ClashSpeedTestGUI
             };
             group.Controls.Add(modeCombo);
 
-            AddLabel(group, "排除关键词：", 230, 29, 90);
-            blockText = AddTextBox(group, 320, 25, 250);
+            AddLabel(group, "排除关键词：", 230, 63, 90);
+            blockText = AddTextBox(group, 320, 59, 250);
             blockText.Name = "BlockKeywordsInput";
-            blockText.TabIndex = 1;
-            AddLabel(group, "用 | 分隔", 575, 29, 70);
+            blockText.TabIndex = 2;
+            AddLabel(group, "用 | 分隔", 575, 63, 70);
 
-            AddLabel(group, "User-Agent：", 660, 29, 85);
-            userAgentText = AddTextBox(group, 745, 25, 350);
+            AddLabel(group, "User-Agent：", 660, 63, 85);
+            userAgentText = AddTextBox(group, 745, 59, 350);
             userAgentText.Name = "UserAgentInput";
-            userAgentText.TabIndex = 2;
+            userAgentText.TabIndex = 3;
 
-            AddLabel(group, "测速地址：", 15, 63, 75);
-            serverUrlText = AddTextBox(group, 90, 59, 1005);
+            AddLabel(group, "测速地址：", 15, 98, 75);
+            serverUrlText = AddTextBox(group, 90, 94, 1005);
             serverUrlText.Name = "ServerUrlInput";
-            serverUrlText.TabIndex = 3;
+            serverUrlText.TabIndex = 4;
 
-            AddLabel(group, "下载量：", 15, 98, 65);
-            downloadSizeNumber = AddNumber(group, 80, 93, 75, 1, 10240, 0);
+            AddLabel(group, "下载量：", 15, 133, 65);
+            downloadSizeNumber = AddNumber(group, 80, 128, 75, 1, 10240, 0);
             downloadSizeNumber.Name = "DownloadSizeInput";
-            downloadSizeNumber.TabIndex = 4;
-            AddLabel(group, "MB", 160, 98, 30);
+            downloadSizeNumber.TabIndex = 5;
+            AddLabel(group, "MB", 160, 133, 30);
 
-            AddLabel(group, "探测超时：", 205, 98, 70);
-            probeTimeoutNumber = AddNumber(group, 275, 93, 70, 0.1M, 60, 1);
+            AddLabel(group, "探测超时：", 205, 133, 70);
+            probeTimeoutNumber = AddNumber(group, 275, 128, 70, 0.1M, 60, 1);
             probeTimeoutNumber.Name = "ProbeTimeoutInput";
-            probeTimeoutNumber.TabIndex = 5;
-            AddLabel(group, "秒", 350, 98, 30);
+            probeTimeoutNumber.TabIndex = 6;
+            AddLabel(group, "秒", 350, 133, 30);
 
-            AddLabel(group, "下载超时：", 395, 98, 70);
-            timeoutNumber = AddNumber(group, 465, 93, 70, 0.1M, 3600, 1);
+            AddLabel(group, "下载超时：", 395, 133, 70);
+            timeoutNumber = AddNumber(group, 465, 128, 70, 0.1M, 3600, 1);
             timeoutNumber.Name = "DownloadTimeoutInput";
-            timeoutNumber.TabIndex = 6;
-            AddLabel(group, "秒", 540, 98, 30);
+            timeoutNumber.TabIndex = 7;
+            AddLabel(group, "秒", 540, 133, 30);
 
-            AddLabel(group, "延迟并发：", 565, 98, 70);
-            concurrentNumber = AddNumber(group, 635, 93, 60, 1, 128, 0);
+            AddLabel(group, "延迟并发：", 565, 133, 70);
+            concurrentNumber = AddNumber(group, 635, 128, 60, 1, 128, 0);
             concurrentNumber.Name = "NodeConcurrencyInput";
-            concurrentNumber.TabIndex = 7;
+            concurrentNumber.TabIndex = 8;
 
-            AddLabel(group, "HTTP 探测失败率：", 715, 98, 125);
-            probeFailureNumber = AddNumber(group, 840, 93, 55, 0, 100, 1);
+            AddLabel(group, "HTTP 探测失败率：", 715, 133, 125);
+            probeFailureNumber = AddNumber(group, 840, 128, 55, 0, 100, 1);
             probeFailureNumber.Name = "ProbeFailureLimitInput";
-            probeFailureNumber.TabIndex = 8;
-            AddLabel(group, "%", 900, 98, 20);
+            probeFailureNumber.TabIndex = 9;
+            AddLabel(group, "%", 900, 133, 20);
 
-            AddLabel(group, "单节点下载连接：", 15, 133, 115);
-            transferConcurrentNumber = AddNumber(group, 130, 128, 65, 1, 16, 0);
+            AddLabel(group, "单节点下载连接：", 15, 168, 115);
+            transferConcurrentNumber = AddNumber(group, 130, 163, 65, 1, 16, 0);
             transferConcurrentNumber.Name = "TransferConcurrencyInput";
             transferConcurrentNumber.TabIndex = 10;
-            AddLabel(group, "仅 download 模式生效；节点间串行下载，当前节点内部允许多连接", 205, 133, 600);
+            AddLabel(group, "仅 download 模式生效；节点间串行下载，当前节点内部允许多连接", 205, 168, 600);
 
             latencyNumber.ValueChanged += delegate { MarkPresetCustom(); };
             downloadSpeedNumber.ValueChanged += delegate { MarkPresetCustom(); };
@@ -3467,13 +3528,14 @@ namespace ClashSpeedTestGUI
                                     operation.Token);
                             }, operation.Token);
                             operation.Token.ThrowIfCancellationRequested();
-                            SetStatus(speedSummary + (upload.Created ? "；秘密 Gist 已创建" : "；Gist 已更新"));
+                            SetStatus(speedSummary + (upload.FileCreated
+                                ? "；Gist 文件链接已创建"
+                                : "；Gist 文件已更新"));
                             MessageBox.Show(this,
-                                speedSummary + (upload.Created
-                                    ? "\n\n筛选结果已保存，秘密 Gist 已创建"
-                                        + "（不公开列出；任何拿到链接的人都能访问）：\n"
-                                    : "\n\n筛选结果已保存，Gist 已更新：\n")
-                                + upload.HtmlUrl,
+                                speedSummary + (upload.FileCreated
+                                    ? "\n\n筛选结果已保存，并按输出文件名创建订阅链接：\n"
+                                    : "\n\n筛选结果已保存；同名 Gist 文件已覆盖，订阅链接保持不变：\n")
+                                + upload.RawUrl,
                                 "完成", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         }
                         catch (OperationCanceledException)
@@ -4788,18 +4850,6 @@ namespace ClashSpeedTestGUI
             }
         }
 
-        private void EnsureRegionFilterOption(NodeSnapshot node)
-        {
-            if (regionFilterCombo == null || node == null
-                || string.IsNullOrWhiteSpace(node.RegionCountryCode)) return;
-            string option = node.RegionCountryCode.ToUpperInvariant() + " " + (node.RegionCountry ?? "").Trim();
-            if (!regionFilterCombo.Items.Cast<object>().Any(delegate(object item)
-            {
-                return string.Equals(Convert.ToString(item, CultureInfo.InvariantCulture), option,
-                    StringComparison.OrdinalIgnoreCase);
-            })) regionFilterCombo.Items.Add(option);
-        }
-
         private string FormatRegionProgress()
         {
             return "正在查询出口地区 " + regionQueryCompleted + "/" + regionQueryTotal
@@ -5563,19 +5613,22 @@ namespace ClashSpeedTestGUI
     internal sealed class GistUploadResult
     {
         public bool Created;
+        public bool FileCreated;
         public string HtmlUrl;
+        public string RawUrl;
     }
 
     internal sealed class GistInfo
     {
         public string Id;
         public string HtmlUrl;
+        public bool FileExists;
     }
 
     internal static class GistClient
     {
         private const string ApiBaseUrl = "https://api.github.com";
-        private const string GistDescription = "Clash-SpeedTest GUI";
+        private const string GistDescriptionPrefix = "Clash-SpeedTest GUI: ";
 
         public static string TryExtractUsername(string address)
         {
@@ -5627,7 +5680,8 @@ namespace ClashSpeedTestGUI
 
                 string gistId = "";
                 string htmlUrl = "";
-                GistInfo existing = FindDedicatedGist(client, serializer, cancellationToken);
+                GistInfo existing = FindDedicatedGist(
+                    client, serializer, fileName, cancellationToken);
                 if (existing != null)
                 {
                     gistId = existing.Id;
@@ -5642,9 +5696,10 @@ namespace ClashSpeedTestGUI
                 body["files"] = files;
 
                 bool created = string.IsNullOrWhiteSpace(gistId);
+                bool fileCreated = created || existing == null || !existing.FileExists;
                 if (created)
                 {
-                    body["description"] = GistDescription;
+                    body["description"] = BuildGistDescription(fileName);
                     body["public"] = false;
                 }
 
@@ -5657,18 +5712,28 @@ namespace ClashSpeedTestGUI
                     DeserializeObject(serializer, responseJson, created ? "Gist 创建结果" : "Gist 更新结果");
                 string responseUrl = GetString(response, "html_url");
                 if (!string.IsNullOrWhiteSpace(responseUrl)) htmlUrl = responseUrl;
+                string responseId = GetString(response, "id");
+                string resolvedGistId = string.IsNullOrWhiteSpace(responseId) ? gistId : responseId;
+                if (string.IsNullOrWhiteSpace(resolvedGistId))
+                    throw new InvalidOperationException("GitHub 未返回可用的 Gist ID。");
                 if (string.IsNullOrWhiteSpace(htmlUrl))
                 {
-                    string responseId = GetString(response, "id");
-                    htmlUrl = "https://gist.github.com/" + actualUsername + "/" + responseId;
+                    htmlUrl = "https://gist.github.com/" + actualUsername + "/" + resolvedGistId;
                 }
 
-                return new GistUploadResult { Created = created, HtmlUrl = htmlUrl };
+                return new GistUploadResult
+                {
+                    Created = created,
+                    FileCreated = fileCreated,
+                    HtmlUrl = htmlUrl,
+                    RawUrl = BuildStableRawUrl(actualUsername, resolvedGistId, fileName)
+                };
             }
         }
 
         private static GistInfo FindDedicatedGist(
-            HttpClient client, JavaScriptSerializer serializer, CancellationToken cancellationToken)
+            HttpClient client, JavaScriptSerializer serializer, string fileName,
+            CancellationToken cancellationToken)
         {
             const int pageSize = 100;
             for (int page = 1; ; page++)
@@ -5684,30 +5749,55 @@ namespace ClashSpeedTestGUI
                     throw new InvalidOperationException("GitHub 返回了无法识别的 Gist 列表。");
                 }
 
-                GistInfo found = FindDedicatedGistInList(gists);
+                GistInfo found = FindDedicatedGistInList(gists, fileName);
                 if (found != null) return found;
                 if (gists.Length < pageSize) return null;
             }
         }
 
-        internal static GistInfo FindDedicatedGistInList(object[] gists)
+        internal static GistInfo FindDedicatedGistInList(object[] gists, string fileName)
         {
             if (gists == null) return null;
+            string targetDescription = BuildGistDescription(fileName);
             foreach (object item in gists)
             {
                 Dictionary<string, object> gist = item as Dictionary<string, object>;
                 if (gist != null
-                    && string.Equals(GetString(gist, "description"), GistDescription,
+                    && string.Equals(GetString(gist, "description"), targetDescription,
                         StringComparison.Ordinal))
                 {
+                    object rawFiles;
+                    Dictionary<string, object> files = gist.TryGetValue("files", out rawFiles)
+                        ? rawFiles as Dictionary<string, object>
+                        : null;
                     return new GistInfo
                     {
                         Id = GetString(gist, "id"),
-                        HtmlUrl = GetString(gist, "html_url")
+                        HtmlUrl = GetString(gist, "html_url"),
+                        FileExists = files != null && files.ContainsKey(fileName)
                     };
                 }
             }
             return null;
+        }
+
+        internal static string BuildGistDescription(string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(fileName))
+                throw new InvalidOperationException("无法为无效的输出文件名创建 Gist。");
+            return GistDescriptionPrefix + fileName;
+        }
+
+        internal static string BuildStableRawUrl(string username, string gistId, string fileName)
+        {
+            if (string.IsNullOrWhiteSpace(username)
+                || string.IsNullOrWhiteSpace(gistId)
+                || string.IsNullOrWhiteSpace(fileName))
+                throw new InvalidOperationException("无法生成 Gist 文件订阅链接。");
+            return "https://gist.githubusercontent.com/"
+                + Uri.EscapeDataString(username) + "/"
+                + Uri.EscapeDataString(gistId) + "/raw/"
+                + Uri.EscapeDataString(fileName);
         }
 
         private static string NormalizeUsername(string value)
@@ -5987,10 +6077,10 @@ namespace ClashSpeedTestGUI
         private static void TestTaskOperationAndBatchQueue()
         {
             Assert(DpiAwarenessProbe.Current() >= 1, "进程启用原生 DPI 感知");
-            Assert(OptionsLayoutPolicy.PanelHeight(661, 22, 635, 455, 170) == 469,
+            Assert(OptionsLayoutPolicy.PanelHeight(661, 22, 635, 421, 170) == 469,
                 "最小窗口展开高级设置时为结果表格保留高度");
-            Assert(OptionsLayoutPolicy.PanelHeight(781, 22, 455, 455, 170) == 455,
-                "默认窗口折叠高度保持稳定");
+            Assert(OptionsLayoutPolicy.PanelHeight(781, 22, 421, 421, 170) == 421,
+                "默认窗口折叠后为结果表格增加高度");
             using (TaskOperation operation = new TaskOperation(7, TaskOperationKind.SpeedTest))
             {
                 Assert(TaskControlPolicy.InputsEnabled(false), "空闲时允许编辑任务设置");
@@ -6961,12 +7051,48 @@ namespace ClashSpeedTestGUI
                 && protocolOptions.Cast<object>().Any(delegate(object value)
                     { return string.Equals(Convert.ToString(value), "SOCKS5", StringComparison.Ordinal); }),
                 "协议筛选从本轮节点类型动态生成");
+            Assert(NodeListPresentation.RegionFilterOptions(null).SequenceEqual(new object[] { "全部" }),
+                "未查询出口地区时不显示无效的固定地区选项");
+            object[] regionOptions = NodeListPresentation.RegionFilterOptions(new[]
+            {
+                new NodeSnapshot
+                    { RegionState = "成功", RegionCountryCode = "DE", RegionCountry = "德国" },
+                new NodeSnapshot
+                    { RegionState = "成功", RegionCountryCode = "BR", RegionCountry = "巴西" },
+                new NodeSnapshot
+                    { RegionState = "查询失败", RegionCountryCode = "JP", RegionCountry = "日本" },
+                new NodeSnapshot
+                    { RegionState = "未查询", RegionCountryCode = "US", RegionCountry = "美国" }
+            });
+            Assert(regionOptions.SequenceEqual(new object[] { "全部", "BR 巴西", "DE 德国" }),
+                "地区筛选只按本轮查询成功结果动态生成且不限于预设国家");
             int visibleIndex = 0;
             Assert(NodeListPresentation.NextVisibleIndex(ref visibleIndex) == "1"
                 && NodeListPresentation.NextVisibleIndex(ref visibleIndex) == "2", "动态序号");
             Assert(StatusStatistics.Format(200, 36, 8, 29, 13, 158)
                 == "总数 200 | 筛选后 36 | 已选 8 | 有效 29 | 失败 13 | 等待 158",
                 "状态栏统计");
+            using (DataGridView selectionGrid = new DataGridView
+            {
+                AllowUserToAddRows = false,
+                MultiSelect = true,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect
+            })
+            {
+                selectionGrid.Columns.Add("node", "node");
+                selectionGrid.Rows.Add("visible-a");
+                selectionGrid.Rows.Add("visible-b");
+                selectionGrid.Rows.Add("hidden-c");
+                selectionGrid.CurrentCell = null;
+                selectionGrid.Rows[2].Visible = false;
+                selectionGrid.SelectAll();
+                Assert(NodeListSelection.GetSelectedVisibleRows(selectionGrid).Count == 2,
+                    "列表操作忽略被原生全选纳入的隐藏行");
+                NodeListSelection.SelectAllVisibleRows(selectionGrid);
+                Assert(selectionGrid.SelectedRows.Count == 2
+                    && NodeListSelection.GetSelectedVisibleRows(selectionGrid).Count == 2,
+                    "筛选后的 Ctrl+A 只选中可见行");
+            }
             Assert(NodeNamePolicy.Normalize("  renamed-node  ") == "renamed-node", "节点名称规范化");
             bool invalidNameRejected = false;
             try
@@ -7165,16 +7291,34 @@ namespace ClashSpeedTestGUI
                 {
                     {"id", "dedicated"},
                     {"html_url", "https://gist.github.com/user/dedicated"},
-                    {"description", "Clash-SpeedTest GUI"}
+                    {"description", "Clash-SpeedTest GUI: existing.yaml"}
                 }
             };
 
-            GistInfo gist = GistClient.FindDedicatedGistInList(gists);
+            Dictionary<string, object> dedicated = gists[1] as Dictionary<string, object>;
+            dedicated["files"] = new Dictionary<string, object>
+            {
+                {"existing.yaml", new Dictionary<string, object>()}
+            };
+            GistInfo gist = GistClient.FindDedicatedGistInList(gists, "existing.yaml");
             Assert(gist != null && gist.Id == "dedicated"
-                && gist.HtmlUrl == "https://gist.github.com/user/dedicated",
-                "程序专用 Gist 匹配");
-            Assert(GistClient.FindDedicatedGistInList(new object[0]) == null,
+                && gist.HtmlUrl == "https://gist.github.com/user/dedicated"
+                && gist.FileExists,
+                "按文件名匹配独立 Gist");
+            Assert(GistClient.FindDedicatedGistInList(gists, "new.yaml") == null,
+                "不同文件名不复用已有 Gist ID");
+            Assert(GistClient.FindDedicatedGistInList(new object[0], "new.yaml") == null,
                 "无专用 Gist 时返回空");
+            Assert(GistClient.BuildGistDescription("existing.yaml")
+                == "Clash-SpeedTest GUI: existing.yaml",
+                "文件名生成独立 Gist 描述");
+            Assert(GistClient.BuildStableRawUrl("user", "dedicated", "existing.yaml")
+                == "https://gist.githubusercontent.com/user/dedicated/raw/existing.yaml",
+                "同名文件生成稳定 raw 订阅链接");
+            Assert(GistClient.BuildStableRawUrl("user", "dedicated", "香港 节点.yaml")
+                == "https://gist.githubusercontent.com/user/dedicated/raw/"
+                    + "%E9%A6%99%E6%B8%AF%20%E8%8A%82%E7%82%B9.yaml",
+                "中文和空格文件名正确编码");
         }
 
         private static void TestGistCancellation()

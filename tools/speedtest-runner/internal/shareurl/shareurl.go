@@ -30,6 +30,8 @@ func Generate(config map[string]any) (string, error) {
 		return generateHysteria2(config)
 	case "tuic":
 		return generateTUIC(config)
+	case "anytls":
+		return generateAnyTLS(config)
 	default:
 		return "", fmt.Errorf("unsupported share URL protocol: %s", proxyType)
 	}
@@ -241,6 +243,56 @@ func generateTUIC(config map[string]any) (string, error) {
 		"#" + escapeFragment(stringValue(config, "name")), nil
 }
 
+func generateAnyTLS(config map[string]any) (string, error) {
+	server, port, err := endpoint(config)
+	if err != nil {
+		return "", err
+	}
+	portNumber, err := strconv.ParseUint(port, 10, 16)
+	if err != nil || portNumber == 0 {
+		return "", fmt.Errorf("anytls port is invalid: %s", port)
+	}
+	password := stringValue(config, "password")
+	if password == "" {
+		return "", fmt.Errorf("anytls password is empty")
+	}
+
+	// The AnyTLS URI format understood by Mihomo can preserve only these
+	// connection fields. Refuse non-empty extensions instead of producing a
+	// link that imports successfully but behaves differently from the source.
+	allowed := map[string]struct{}{
+		"name": {}, "type": {}, "server": {}, "port": {}, "username": {},
+		"password": {}, "sni": {}, "fingerprint": {},
+		"skip-cert-verify": {}, "udp": {},
+	}
+	for key, value := range config {
+		if _, ok := allowed[key]; !ok && meaningfulValue(value) {
+			return "", fmt.Errorf("anytls share URL cannot preserve field: %s", key)
+		}
+	}
+	if value, exists := config["udp"]; exists && !boolScalar(value) {
+		return "", fmt.Errorf("anytls share URL cannot preserve udp=false")
+	}
+
+	query := url.Values{}
+	setIfPresent(query, "sni", firstString(config, "sni", "servername"))
+	setIfPresent(query, "hpkp", stringValue(config, "fingerprint"))
+	if boolValue(config, "skip-cert-verify") {
+		query.Set("insecure", "1")
+	}
+
+	result := "anytls://" + url.User(password).String() + "@" + hostPort(server, port)
+	if encoded := query.Encode(); encoded != "" {
+		result += "?" + encoded
+	}
+	result += "#" + escapeFragment(stringValue(config, "name"))
+	parsed, err := url.Parse(result)
+	if err != nil || parsed.Hostname() == "" || parsed.Port() == "" {
+		return "", fmt.Errorf("invalid anytls endpoint")
+	}
+	return result, nil
+}
+
 func addTransportOptions(query url.Values, config map[string]any, network string) {
 	setIfPresent(query, "host", transportHost(config, network))
 	setIfPresent(query, "path", transportPath(config, network))
@@ -370,6 +422,51 @@ func boolValue(values map[string]any, key string) bool {
 		return value
 	default:
 		return false
+	}
+}
+
+func boolScalar(value any) bool {
+	switch typed := value.(type) {
+	case bool:
+		return typed
+	case string:
+		parsed, err := strconv.ParseBool(typed)
+		return err == nil && parsed
+	default:
+		return false
+	}
+}
+
+func meaningfulValue(value any) bool {
+	switch typed := value.(type) {
+	case nil:
+		return false
+	case string:
+		return typed != ""
+	case bool:
+		return typed
+	case int:
+		return typed != 0
+	case int64:
+		return typed != 0
+	case uint64:
+		return typed != 0
+	case float64:
+		return typed != 0
+	case float32:
+		return typed != 0
+	case json.Number:
+		return typed.String() != "" && typed.String() != "0"
+	case []string:
+		return len(typed) != 0
+	case []any:
+		return len(typed) != 0
+	case map[string]any:
+		return len(typed) != 0
+	case map[any]any:
+		return len(typed) != 0
+	default:
+		return true
 	}
 }
 

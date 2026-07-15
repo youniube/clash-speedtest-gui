@@ -1,6 +1,7 @@
 # Local inputs and generated results may contain subscription credentials.
 /cs.yaml
 /wa.yaml
+/lin.yaml
 /filtered.yaml
 /*.tmp.yaml
 /*.log
