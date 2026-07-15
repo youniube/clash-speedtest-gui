@@ -35,8 +35,12 @@ namespace ClashSpeedTestGUI.UiFixtures
         {
             Process guiProcess = null;
             Window mainWindow = null;
+            System.Windows.Forms.DataObject clipboardSnapshot = null;
+            bool clipboardCaptured = false;
             try
             {
+                clipboardSnapshot = CaptureClipboardSnapshot();
+                clipboardCaptured = true;
                 DriverOptions options = DriverOptions.Parse(args);
                 tracePath = Path.Combine(options.SandboxPath, "work", "driver-trace.log");
                 Trace("options parsed");
@@ -118,11 +122,17 @@ namespace ClashSpeedTestGUI.UiFixtures
 
                     SelectComboBox(mainWindow, "StatusFilter", "失败");
                     AssertComboSelected(mainWindow, "StatusFilter", "失败");
+                    AssertVisibleSelectionCopy(mainWindow, resultGrid, ":10003");
                     SelectComboBox(mainWindow, "StatusFilter", "全部");
+                    SelectComboBox(mainWindow, "LatencyFilter", "<100ms");
+                    AssertComboSelected(mainWindow, "LatencyFilter", "<100ms");
+                    AssertVisibleSelectionCopy(mainWindow, resultGrid, ":10001");
+                    SelectComboBox(mainWindow, "LatencyFilter", "全部");
                     SelectComboBox(mainWindow, "ProtocolFilter", "Trojan");
                     AssertComboSelected(mainWindow, "ProtocolFilter", "Trojan");
+                    AssertVisibleSelectionCopy(mainWindow, resultGrid, ":10002");
                     SelectComboBox(mainWindow, "ProtocolFilter", "全部");
-                    Trace("list filters passed");
+                    Trace("status, latency, and protocol filters use visible-only selection");
 
                     ClickGridHeaderByIndex(resultGrid, 3);
                     ClickGridHeaderByIndex(resultGrid, 3);
@@ -142,10 +152,7 @@ namespace ClashSpeedTestGUI.UiFixtures
                     WaitForDisabled(FindById(mainWindow, "StopTaskButton"),
                         "stop button remained enabled after region cancellation");
                     AssertElementTextContains(mainWindow, "StatusText", "查询前地区信息已恢复");
-                    AssertComboItems(mainWindow, "RegionFilter", new[]
-                    {
-                        "全部", "US 美国", "JP 日本", "HK 香港", "SG 新加坡", "TW 台湾"
-                    });
+                    AssertEnabled(mainWindow, "RegionFilter", false);
                     Trace("region cancellation rollback passed");
 
                     WriteControl(options.SandboxPath, "region-mode.txt", "all-success");
@@ -155,12 +162,14 @@ namespace ClashSpeedTestGUI.UiFixtures
                     WaitForSignal(options.SandboxPath, "region-completed.json");
                     WaitForElementTextContains(mainWindow, "StatusText", "出口地区查询完成：成功 2",
                         "successful region query was not committed");
-                    AssertComboContains(mainWindow, "RegionFilter", "HK");
-                    AssertComboContains(mainWindow, "RegionFilter", "US");
+                    AssertEnabled(mainWindow, "RegionFilter", true);
+                    AssertComboItems(mainWindow, "RegionFilter",
+                        new[] { "全部", "HK 香港", "US 美国" });
                     SelectComboBoxByPrefix(mainWindow, "RegionFilter", "HK");
                     AssertComboSelectedByPrefix(mainWindow, "RegionFilter", "HK");
+                    AssertVisibleSelectionCopy(mainWindow, resultGrid, ":10001");
                     SelectComboBox(mainWindow, "RegionFilter", "全部");
-                    Trace("successful region query and filter passed");
+                    Trace("region filter uses visible-only selection");
 
                     WriteControl(options.SandboxPath, "region-mode.txt", "malformed");
                     DeleteSignal(options.SandboxPath, "region-first-event.json");
@@ -170,8 +179,8 @@ namespace ClashSpeedTestGUI.UiFixtures
                     DismissDialog(guiProcess.Id, "出口地区查询失败");
                     WaitForEnabled(startButton, "malformed region query did not return to idle");
                     AssertElementTextContains(mainWindow, "StatusText", "查询前地区信息已恢复");
-                    AssertComboContains(mainWindow, "RegionFilter", "HK");
-                    AssertComboContains(mainWindow, "RegionFilter", "US");
+                    AssertComboItems(mainWindow, "RegionFilter",
+                        new[] { "全部", "HK 香港", "US 美国" });
                     Trace("malformed region rollback passed");
 
                     DeleteSignal(options.SandboxPath, "manage-config-completed.json");
@@ -260,7 +269,139 @@ namespace ClashSpeedTestGUI.UiFixtures
                     catch { }
                     guiProcess.Dispose();
                 }
+                if (clipboardCaptured) RestoreClipboardSnapshot(clipboardSnapshot);
             }
+        }
+
+        private static void AssertVisibleSelectionCopy(
+            AutomationElement root, AutomationElement grid, string expectedIdentity)
+        {
+            WaitUntil(delegate
+            {
+                return ElementTextContains(root, "StatisticsText", "筛选后 1");
+            }, "list filter did not reduce the grid to one visible row");
+            string marker = "ClashSpeedTestGUI-ClipboardTest-" + Guid.NewGuid().ToString("N");
+            SetClipboardText(marker);
+            grid.Focus();
+            WaitUntil(delegate
+            {
+                return grid.Properties.HasKeyboardFocus.Value;
+            }, "result grid did not receive keyboard focus");
+            TypeControlKey(VirtualKeyShort.KEY_A);
+            InvokeGridContextCommand(grid, 0, 0);
+            WaitUntil(delegate
+            {
+                string value = GetClipboardText();
+                return value.Length > 0
+                    && !string.Equals(value, marker, StringComparison.Ordinal);
+            }, "filtered copy did not update the clipboard");
+            string actual = GetClipboardText().Trim();
+            string[] lines = actual.Split(new[] { "\r\n", "\n" },
+                StringSplitOptions.RemoveEmptyEntries);
+            if (lines.Length != 1
+                || actual.IndexOf(expectedIdentity, StringComparison.Ordinal) < 0)
+                throw new InvalidOperationException(
+                    "Filtered copy returned unexpected URLs. Expected one visible node matching "
+                    + expectedIdentity + ", actual clipboard: "
+                    + actual);
+            AssertElementTextContains(root, "StatusText", "已复制 1 个节点 URL");
+        }
+
+        private static void TypeControlKey(VirtualKeyShort key)
+        {
+            Keyboard.Press(VirtualKeyShort.CONTROL);
+            try
+            {
+                Keyboard.Press(key);
+                Keyboard.Release(key);
+            }
+            finally
+            {
+                Keyboard.Release(VirtualKeyShort.CONTROL);
+            }
+        }
+
+        private static System.Windows.Forms.DataObject CaptureClipboardSnapshot()
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    System.Windows.Forms.IDataObject source =
+                        System.Windows.Forms.Clipboard.GetDataObject();
+                    System.Windows.Forms.DataObject snapshot =
+                        new System.Windows.Forms.DataObject();
+                    if (source == null) return snapshot;
+                    foreach (string format in source.GetFormats(false))
+                    {
+                        object value = source.GetData(format, false);
+                        if (value != null) snapshot.SetData(format, false, value);
+                    }
+                    return snapshot;
+                }
+                catch (ExternalException)
+                {
+                    if (attempt == 9) throw;
+                    Thread.Sleep(50);
+                }
+            }
+            throw new InvalidOperationException("Could not capture the clipboard.");
+        }
+
+        private static void RestoreClipboardSnapshot(System.Windows.Forms.DataObject snapshot)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    if (snapshot == null || snapshot.GetFormats(false).Length == 0)
+                        System.Windows.Forms.Clipboard.Clear();
+                    else
+                        System.Windows.Forms.Clipboard.SetDataObject(snapshot, true);
+                    return;
+                }
+                catch (ExternalException)
+                {
+                    if (attempt == 9) throw;
+                    Thread.Sleep(50);
+                }
+            }
+        }
+
+        private static void SetClipboardText(string value)
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    System.Windows.Forms.Clipboard.SetText(value);
+                    return;
+                }
+                catch (ExternalException)
+                {
+                    if (attempt == 9) throw;
+                    Thread.Sleep(50);
+                }
+            }
+        }
+
+        private static string GetClipboardText()
+        {
+            for (int attempt = 0; attempt < 10; attempt++)
+            {
+                try
+                {
+                    return System.Windows.Forms.Clipboard.ContainsText()
+                        ? System.Windows.Forms.Clipboard.GetText()
+                        : "";
+                }
+                catch (ExternalException)
+                {
+                    if (attempt == 9) throw;
+                    Thread.Sleep(50);
+                }
+            }
+            return "";
         }
 
         private static void StartLauncher(string launcherPath)
@@ -427,7 +568,20 @@ namespace ClashSpeedTestGUI.UiFixtures
             if (element == null)
                 throw new InvalidOperationException(
                     "Combo box was not found: " + automationId);
-            element.AsComboBox().Select(value);
+            AutomationElement[] items = element.AsComboBox().Items;
+            int selectedIndex = -1;
+            for (int index = 0; index < items.Length; index++)
+            {
+                if (string.Equals(items[index].Name, value, StringComparison.Ordinal))
+                {
+                    selectedIndex = index;
+                    break;
+                }
+            }
+            if (selectedIndex < 0)
+                throw new InvalidOperationException(
+                    automationId + " did not contain item '" + value + "'.");
+            SelectComboBoxIndex(element, selectedIndex);
         }
 
         private static void SelectComboBoxByPrefix(
@@ -438,19 +592,32 @@ namespace ClashSpeedTestGUI.UiFixtures
                 throw new InvalidOperationException(
                     "Combo box was not found: " + automationId);
             ComboBox combo = element.AsComboBox();
-            AutomationElement item = null;
-            foreach (AutomationElement candidate in combo.Items)
+            AutomationElement[] items = combo.Items;
+            int selectedIndex = -1;
+            for (int index = 0; index < items.Length; index++)
             {
-                if ((candidate.Name ?? "").StartsWith(prefix, StringComparison.Ordinal))
+                if ((items[index].Name ?? "").StartsWith(prefix, StringComparison.Ordinal))
                 {
-                    item = candidate;
+                    selectedIndex = index;
                     break;
                 }
             }
-            if (item == null)
+            if (selectedIndex < 0)
                 throw new InvalidOperationException(
                     automationId + " did not contain an item starting with " + prefix + ".");
-            combo.Select(item.Name);
+            SelectComboBoxIndex(element, selectedIndex);
+        }
+
+        private static void SelectComboBoxIndex(AutomationElement element, int selectedIndex)
+        {
+            element.Focus();
+            WaitUntil(delegate
+            {
+                return element.Properties.HasKeyboardFocus.Value;
+            }, "combo box did not receive keyboard focus");
+            Keyboard.Type(new[] { (VirtualKeyShort)0x24 });
+            for (int index = 0; index < selectedIndex; index++)
+                Keyboard.Type(new[] { (VirtualKeyShort)0x28 });
         }
 
         private static void AssertComboItems(
@@ -472,21 +639,6 @@ namespace ClashSpeedTestGUI.UiFixtures
                         automationId + " item " + index + " was '" + items[index].Name
                         + "', expected '" + expected[index] + "'.");
             }
-        }
-
-        private static void AssertComboContains(
-            AutomationElement root, string automationId, string prefix)
-        {
-            AutomationElement element = FindById(root, automationId);
-            if (element == null)
-                throw new InvalidOperationException(
-                    "Combo box was not found: " + automationId);
-            foreach (AutomationElement item in element.AsComboBox().Items)
-            {
-                if ((item.Name ?? "").StartsWith(prefix, StringComparison.Ordinal)) return;
-            }
-            throw new InvalidOperationException(
-                automationId + " did not contain an item starting with " + prefix + ".");
         }
 
         private static void ClickGridHeaderByIndex(AutomationElement grid, int columnIndex)

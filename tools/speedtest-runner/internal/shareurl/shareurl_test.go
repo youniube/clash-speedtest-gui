@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+
+	"github.com/metacubex/mihomo/common/convert"
 )
 
 func TestGenerateVLESSPreservesTransportAndReality(t *testing.T) {
@@ -171,6 +173,107 @@ func TestGenerateRemainingSupportedProtocols(t *testing.T) {
 				if !strings.Contains(link, part) {
 					t.Fatalf("link %q does not contain %q", link, part)
 				}
+			}
+		})
+	}
+}
+
+func TestGenerateAnyTLSPreservesSupportedFields(t *testing.T) {
+	link, err := Generate(map[string]any{
+		"name":             "AnyTLS 台湾 01",
+		"type":             "anytls",
+		"server":           "2001:db8::1",
+		"port":             443,
+		"password":         "p@ss:/?#word",
+		"sni":              "origin.example.com",
+		"fingerprint":      "sha256-pin",
+		"skip-cert-verify": true,
+		"udp":              true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := url.Parse(link)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Scheme != "anytls" || parsed.Hostname() != "2001:db8::1" || parsed.Port() != "443" {
+		t.Fatalf("unexpected AnyTLS endpoint: %s", link)
+	}
+	if parsed.User.Username() != "p@ss:/?#word" {
+		t.Fatalf("AnyTLS password was not escaped safely: %s", link)
+	}
+	assertQuery(t, parsed.Query(), "sni", "origin.example.com")
+	assertQuery(t, parsed.Query(), "hpkp", "sha256-pin")
+	assertQuery(t, parsed.Query(), "insecure", "1")
+	if parsed.Fragment != "AnyTLS 台湾 01" {
+		t.Fatalf("unexpected AnyTLS name: %q", parsed.Fragment)
+	}
+}
+
+func TestGenerateAnyTLSRoundTripsThroughProductionConverter(t *testing.T) {
+	source := map[string]any{
+		"name":             "AnyTLS round trip",
+		"type":             "anytls",
+		"server":           "edge.example.com",
+		"port":             8443,
+		"password":         "secret:@/value",
+		"sni":              "sni.example.com",
+		"fingerprint":      "certificate-pin",
+		"skip-cert-verify": true,
+		"udp":              true,
+	}
+	link, err := Generate(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies, err := convert.ConvertsV2Ray([]byte(link))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proxies) != 1 {
+		t.Fatalf("expected one round-tripped proxy, got %d", len(proxies))
+	}
+	actual := proxies[0]
+	for _, key := range []string{"name", "type", "server", "password", "sni", "fingerprint"} {
+		if scalarString(actual[key]) != scalarString(source[key]) {
+			t.Fatalf("round-trip field %s: expected %#v, got %#v", key, source[key], actual[key])
+		}
+	}
+	if scalarString(actual["port"]) != scalarString(source["port"]) {
+		t.Fatalf("round-trip port: expected %#v, got %#v", source["port"], actual["port"])
+	}
+	if !boolValue(actual, "skip-cert-verify") || !boolValue(actual, "udp") {
+		t.Fatalf("round-trip booleans were not preserved: %#v", actual)
+	}
+}
+
+func TestGenerateAnyTLSRejectsLossyConfigurations(t *testing.T) {
+	base := map[string]any{
+		"name": "anytls", "type": "anytls", "server": "example.com", "port": 443,
+		"password": "secret", "udp": true,
+	}
+	tests := []struct {
+		name  string
+		field string
+		value any
+	}{
+		{name: "ALPN", field: "alpn", value: []any{"h2"}},
+		{name: "client fingerprint", field: "client-fingerprint", value: "chrome"},
+		{name: "ECH", field: "ech-opts", value: map[string]any{"enable": true}},
+		{name: "client certificate", field: "certificate", value: "certificate"},
+		{name: "session tuning", field: "idle-session-timeout", value: 30},
+		{name: "disabled UDP", field: "udp", value: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			config := make(map[string]any, len(base)+1)
+			for key, value := range base {
+				config[key] = value
+			}
+			config[test.field] = test.value
+			if _, err := Generate(config); err == nil {
+				t.Fatalf("AnyTLS configuration with %s must not be copied lossily", test.field)
 			}
 		})
 	}

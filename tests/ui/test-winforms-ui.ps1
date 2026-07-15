@@ -1,3 +1,7 @@
+param(
+    [string] $GuiPath
+)
+
 $ErrorActionPreference = 'Stop'
 
 $root = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -21,7 +25,7 @@ New-Item -ItemType Directory -Force -Path $artifactRoot | Out-Null
 
 try {
     $flaui = & (Join-Path $PSScriptRoot 'prepare-flaui.ps1')
-    $fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1')
+    $fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1') -GuiPath $GuiPath
     [IO.File]::WriteAllText(
         (Join-Path $fixture.Sandbox 'control\speed-mode.txt'),
         'success',
