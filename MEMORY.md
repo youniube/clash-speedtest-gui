@@ -121,3 +121,4 @@
 - 2026-07-15 AnyTLS 分享 URL 已按 Mihomo URI 语义接入：无损保留 server/port/password/SNI/证书指纹/跳过校验/UDP，并对 ALPN、客户端指纹、ECH、客户端证书、会话调优、`udp=false` 等 URL 无法表达的非默认配置继续拒绝复制。测试覆盖特殊字符与 IPv6、生产转换器语义回环，以及“本地 AnyTLS 服务端 → 生成 URL → 重新导入 → Mihomo 建立代理 → HTTP 成功”的真实连接链路；完整构建、GUI 自测、UI 夹具、两模块测试及 `go vet` 通过。当前 `lin.yaml` 的 11 个 AnyTLS 均能生成并回环，但原配置和回环配置当时都无公网可达节点，不能作为公网连接成功样本。
 - 2026-07-15 GitHub 同步前复核确认根目录 `lin.yaml` 是本地敏感输入，只用于 AnyTLS 回归，不属于源码或发布内容；已加入 `.gitignore`，后续提交和推送必须继续排除该文件。
 - 2026-07-15 本轮正式发布版本确定为 `v2.1.0`：新增 AnyTLS 分享 URL 与真实连接回归、按输出文件隔离的稳定 Gist 链接、动态出口地区选项，并修复筛选后隐藏行仍参与批量操作的问题；继续兼容 `v2.0.0` 的测速协议 v5。
+- 2026-07-15 PR #4 已 squash 合并到 `main` 提交 `2eac108`，正式 `v2.1.0` Release 位于 `github.com/youniube/clash-speedtest-gui/releases/tag/v2.1.0`；远端重新下载后的 Windows x86_64 ZIP SHA-256 已复核为 `be10fc11f3e202aff473d1169de2efcf27d3164f498dfff4e2e2ba562fcb5baf`。
