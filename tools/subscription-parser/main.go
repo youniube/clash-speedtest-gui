@@ -76,9 +76,12 @@ func main() {
 }
 
 func loadAndParse(input, userAgent string, timeout time.Duration) (*parseResult, error) {
+	var parseErr error
 	body, err := readInput(input, userAgent, timeout)
 	if err == nil {
-		if result, parseErr := parseSubscription(body); parseErr == nil {
+		var result *parseResult
+		result, parseErr = parseSubscriptionForInput(body, input)
+		if parseErr == nil {
 			return result, nil
 		}
 	}
@@ -87,7 +90,7 @@ func loadAndParse(input, userAgent string, timeout time.Duration) (*parseResult,
 	if fallback != input {
 		fallbackBody, fallbackErr := readInput(fallback, userAgent, timeout)
 		if fallbackErr == nil {
-			if result, parseErr := parseSubscription(fallbackBody); parseErr == nil {
+			if result, parseErr := parseSubscriptionForInput(fallbackBody, fallback); parseErr == nil {
 				return result, nil
 			}
 		}
@@ -95,6 +98,9 @@ func loadAndParse(input, userAgent string, timeout time.Duration) (*parseResult,
 
 	if err != nil {
 		return nil, fmt.Errorf("subscription request failed: %w", err)
+	}
+	if parseErr != nil {
+		return nil, parseErr
 	}
 	return nil, fmt.Errorf("unsupported or empty subscription format")
 }
@@ -192,9 +198,14 @@ func isInlineNode(input string) bool {
 }
 
 func parseSubscription(body []byte) (*parseResult, error) {
+	return parseSubscriptionForInput(body, "")
+}
+
+func parseSubscriptionForInput(body []byte, input string) (*parseResult, error) {
 	var config rawConfig
 	if err := yaml.Unmarshal(body, &config); err == nil &&
 		(len(config.Proxies) > 0 || len(config.Providers) > 0) {
+		normalizeLocalProviderPaths(&config, input)
 		normalized, err := yaml.Marshal(&config)
 		if err != nil {
 			return nil, err
@@ -207,9 +218,9 @@ func parseSubscription(body []byte) (*parseResult, error) {
 		}, nil
 	}
 
-	proxies, err := convert.ConvertsV2Ray(body)
-	if err != nil || len(proxies) == 0 {
-		return nil, fmt.Errorf("unsupported or empty subscription format")
+	proxies, err := convertStrictURIList(body)
+	if err != nil {
+		return nil, err
 	}
 
 	converted := &rawConfig{
@@ -225,6 +236,60 @@ func parseSubscription(body []byte) (*parseResult, error) {
 		format:  "base64-or-uri-list",
 		proxies: len(proxies),
 	}, nil
+}
+
+func convertStrictURIList(body []byte) ([]map[string]any, error) {
+	decoded := convert.DecodeBase64(body)
+	nonEmptyLines := 0
+	for index, rawLine := range strings.Split(string(decoded), "\n") {
+		line := strings.TrimRight(rawLine, " \r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		nonEmptyLines++
+		converted, err := convert.ConvertsV2Ray([]byte(line))
+		if err != nil || len(converted) != 1 {
+			return nil, fmt.Errorf(
+				"subscription URI line %d is invalid or unsupported", index+1)
+		}
+	}
+	if nonEmptyLines == 0 {
+		return nil, fmt.Errorf("unsupported or empty subscription format")
+	}
+
+	// Convert the complete list after validating every physical line so
+	// Mihomo can still apply its stable duplicate-name numbering across lines.
+	proxies, err := convert.ConvertsV2Ray(decoded)
+	if err != nil || len(proxies) != nonEmptyLines {
+		return nil, fmt.Errorf("subscription URI list could not be converted completely")
+	}
+	return proxies, nil
+}
+
+func normalizeLocalProviderPaths(config *rawConfig, input string) {
+	if config == nil || strings.TrimSpace(input) == "" || isInlineNode(input) || isHTTPInput(input) {
+		return
+	}
+	absoluteInput, err := filepath.Abs(input)
+	if err != nil {
+		return
+	}
+	baseDirectory := filepath.Dir(absoluteInput)
+	for _, providerConfig := range config.Providers {
+		if providerURL, ok := providerConfig["url"].(string); ok && strings.TrimSpace(providerURL) != "" {
+			continue
+		}
+		providerPath, ok := providerConfig["path"].(string)
+		if !ok || strings.TrimSpace(providerPath) == "" || filepath.IsAbs(providerPath) {
+			continue
+		}
+		providerConfig["path"] = filepath.Clean(filepath.Join(baseDirectory, providerPath))
+	}
+}
+
+func isHTTPInput(input string) bool {
+	lower := strings.ToLower(strings.TrimSpace(input))
+	return strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://")
 }
 
 func withoutMetaFlag(input string) string {

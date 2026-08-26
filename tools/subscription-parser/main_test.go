@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -38,6 +40,63 @@ func TestParseBase64URIList(t *testing.T) {
 	}
 	if result.format != "base64-or-uri-list" || result.proxies != 2 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestParseURIListFailsClosedWhenAnyLineIsInvalid(t *testing.T) {
+	links := strings.Join([]string{
+		"trojan://password@example.com:443?sni=example.com#valid",
+		"unsupported://partial-secret@example.org:443#invalid",
+	}, "\n")
+	tests := []struct {
+		name string
+		body []byte
+	}{
+		{name: "plain", body: []byte(links)},
+		{name: "base64", body: []byte(base64.StdEncoding.EncodeToString([]byte(links)))},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result, err := parseSubscription(test.body)
+			if err == nil {
+				t.Fatalf("mixed valid and invalid URI lines unexpectedly succeeded: %+v", result)
+			}
+			if result != nil {
+				t.Fatalf("failed URI list returned a partial result: %+v", result)
+			}
+			if !strings.Contains(err.Error(), "line 2") {
+				t.Fatalf("error does not identify the invalid line: %v", err)
+			}
+			if strings.Contains(err.Error(), "partial-secret") {
+				t.Fatalf("error leaked URI credentials: %v", err)
+			}
+		})
+	}
+}
+
+func TestLoadAndParsePreservesSanitizedInvalidURILineError(t *testing.T) {
+	input := filepath.Join(t.TempDir(), "mixed-invalid.txt")
+	links := strings.Join([]string{
+		"trojan://password@example.com:443?sni=example.com#valid",
+		"unsupported://partial-secret@example.org:443#invalid",
+	}, "\n")
+	if err := os.WriteFile(input, []byte(links), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := loadAndParse(input, defaultUserAgent, time.Second)
+	if err == nil {
+		t.Fatalf("mixed valid and invalid URI file unexpectedly succeeded: %+v", result)
+	}
+	if result != nil {
+		t.Fatalf("failed URI file returned a partial result: %+v", result)
+	}
+	if !strings.Contains(err.Error(), "line 2") {
+		t.Fatalf("CLI parse error does not preserve the invalid line: %v", err)
+	}
+	if strings.Contains(err.Error(), "partial-secret") {
+		t.Fatalf("CLI parse error leaked URI credentials: %v", err)
 	}
 }
 
@@ -105,6 +164,33 @@ func TestLoadDirectNodeURI(t *testing.T) {
 	}
 	if result.format != "base64-or-uri-list" || result.proxies != 1 {
 		t.Fatalf("unexpected result: %+v", result)
+	}
+}
+
+func TestLoadLocalConfigNormalizesRelativeFileProviderPath(t *testing.T) {
+	directory := t.TempDir()
+	inputPath := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(inputPath, []byte(`proxy-providers:
+  local:
+    type: file
+    path: providers/nodes.yaml
+proxies: []
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := loadAndParse(inputPath, "test", time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var config rawConfig
+	if err := yaml.Unmarshal(result.body, &config); err != nil {
+		t.Fatal(err)
+	}
+	want := filepath.Join(directory, "providers", "nodes.yaml")
+	got, _ := config.Providers["local"]["path"].(string)
+	if got != want {
+		t.Fatalf("normalized provider path=%q, want %q", got, want)
 	}
 }
 

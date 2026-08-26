@@ -84,6 +84,127 @@ func TestWriteManifestIncludesCompleteNodeEvent(t *testing.T) {
 	}
 }
 
+func TestWriteManifestKeepsLossyNodeAsExplicitShareError(t *testing.T) {
+	configs := []map[string]any{
+		{
+			"name": "good-node", "type": "ss", "server": "ss.example.com", "port": 443,
+			"cipher": "aes-128-gcm", "password": "good-password",
+		},
+		{
+			"name": "bad-node", "type": "trojan", "server": "trojan.example.com", "port": 443,
+			"password": "bad-password", "network": "ws",
+			"ws-opts": map[string]any{
+				"path": "/socket", "headers": map[string]any{"Host": "private-cdn.example.com"},
+			},
+		},
+	}
+	proxies := make(map[string]*speedtester.CProxy, len(configs))
+	for _, config := range configs {
+		proxy, err := adapter.ParseProxy(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := config["name"].(string)
+		proxies[name] = &speedtester.CProxy{Proxy: proxy, Config: config}
+	}
+
+	var buffer bytes.Buffer
+	writer := bufio.NewWriter(&buffer)
+	if _, err := writeManifest(writer, proxies); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	events := make([]nodeEvent, 0, len(configs))
+	for _, line := range strings.Split(buffer.String(), "\n") {
+		if !strings.HasPrefix(line, "@nodejson\t") {
+			continue
+		}
+		body, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(line, "@nodejson\t"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event nodeEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		events = append(events, event)
+	}
+	if len(events) != 2 || events[0].Name != "bad-node" || events[1].Name != "good-node" {
+		t.Fatalf("manifest silently skipped or reordered a node: %#v", events)
+	}
+	bad, good := events[0], events[1]
+	if bad.ShareURL != "" || !strings.Contains(bad.ShareError, "ws-opts.headers.Host") {
+		t.Fatalf("lossy node was not represented as an explicit share error: %#v", bad)
+	}
+	for _, sensitive := range []string{
+		"bad-password", "private-cdn.example.com", "trojan://", "\"password\"",
+	} {
+		if strings.Contains(bad.ShareError, sensitive) {
+			t.Fatal("share error leaked a credential, URL, or serialized configuration")
+		}
+	}
+	if good.ShareURL == "" || good.ShareError != "" {
+		t.Fatalf("valid node lost its share URL: %#v", good)
+	}
+}
+
+func TestPrepareConfigSourcesFromRequestUsesStrictVersionedProtocol(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "config.yaml")
+	if err := os.WriteFile(configPath, []byte(`proxy-providers:
+  inline:
+    type: inline
+    payload:
+      - name: prepared-node
+        type: trojan
+        server: prepared.example.com
+        port: 443
+        password: prepared-password
+proxies: []
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	requestPath := filepath.Join(directory, "prepare-request.json")
+	request := sourcePreparationRequest{
+		Version: speedtester.PreparedSourceProtocolVersion,
+		Sources: []speedtester.ConfigSource{{
+			Path: configPath, Origin: speedtester.SourceOriginLocal, LocalDependency: configPath,
+		}},
+	}
+	body, err := json.Marshal(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(requestPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	result, err := prepareConfigSourcesFromRequest(requestPath, "test-agent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Version != speedtester.PreparedSourceProtocolVersion || len(result.ConfigPaths) != 1 {
+		t.Fatalf("unexpected preparation result: %#v", result)
+	}
+
+	for name, invalid := range map[string]string{
+		"unknown field":  `{"version":1,"sources":[],"extra":true}`,
+		"trailing value": `{"version":1,"sources":[]} {}`,
+		"wrong version":  `{"version":2,"sources":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			invalidPath := filepath.Join(t.TempDir(), "invalid.json")
+			if err := os.WriteFile(invalidPath, []byte(invalid), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if result, err := prepareConfigSourcesFromRequest(invalidPath, ""); err == nil {
+				t.Fatalf("invalid source preparation request succeeded: %#v", result)
+			}
+		})
+	}
+}
+
 type alwaysFailWriter struct{}
 
 func (alwaysFailWriter) Write([]byte) (int, error) {
@@ -562,6 +683,169 @@ func TestLoadProxiesKeepsSameNameNodesAcrossSources(t *testing.T) {
 	}
 	if len(proxies) != 3 {
 		t.Fatalf("same-name nodes must be preserved, got %d", len(proxies))
+	}
+}
+
+func TestProviderNameCollisionKeepsManifestStableIDsAndExport(t *testing.T) {
+	directory := t.TempDir()
+	configPath := filepath.Join(directory, "provider-collision.yaml")
+	config := []byte(`proxy-providers:
+  p:
+    type: inline
+    payload:
+      - name: node
+        type: trojan
+        server: provider.example.com
+        port: 443
+        password: provider-password
+proxies:
+  - name: "[p] node"
+    type: trojan
+    server: top-level.example.com
+    port: 443
+    password: top-level-password
+  - name: "[p] node [2]"
+    type: trojan
+    server: reserved-two.example.com
+    port: 443
+    password: reserved-two-password
+  - name: "[p] node [3]"
+    type: trojan
+    server: reserved-three.example.com
+    port: 443
+    password: reserved-three-password
+`)
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tester, err := speedtester.New(&speedtester.Config{
+		ConfigPaths: configPath,
+		FilterRegex: ".*",
+		ServerURL:   "https://example.com/file.bin",
+		Mode:        speedtester.SpeedModeFast,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxies, err := tester.LoadProxies()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(proxies) != 4 {
+		t.Fatalf("provider collision retained %d nodes, want 4 before manifest/export: %#v", len(proxies), proxies)
+	}
+	wantServers := map[string]string{
+		"[p] node":     "top-level.example.com",
+		"[p] node [2]": "reserved-two.example.com",
+		"[p] node [3]": "reserved-three.example.com",
+		"[p] node [4]": "provider.example.com",
+	}
+	wantIDs := make(map[string]string, len(proxies))
+	for name, wantServer := range wantServers {
+		proxy := proxies[name]
+		if proxy == nil {
+			t.Fatalf("missing collision-safe node %q: %#v", name, proxies)
+		}
+		if server, _ := proxy.Config["server"].(string); server != wantServer {
+			t.Fatalf("node %q server=%q, want %q", name, server, wantServer)
+		}
+		beforeAutomaticRename := make(map[string]any, len(proxy.Config))
+		for key, value := range proxy.Config {
+			beforeAutomaticRename[key] = value
+		}
+		beforeAutomaticRename["name"] = "original-name-does-not-affect-id"
+		fingerprint, err := configFingerprint(beforeAutomaticRename)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wantID := fmt.Sprintf("%x", fingerprint)
+		if got := nodeID(name, proxy); got != wantID {
+			t.Fatalf("automatic rename changed stable ID for %q: got %s want %s", name, got, wantID)
+		}
+		wantIDs[name] = wantID
+	}
+
+	var manifest bytes.Buffer
+	writer := bufio.NewWriter(&manifest)
+	manifestIDs, err := writeManifest(writer, proxies)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	if len(manifestIDs) != len(proxies) {
+		t.Fatalf("manifest IDs=%d, loaded nodes=%d", len(manifestIDs), len(proxies))
+	}
+	if nodeEvents := strings.Count(manifest.String(), "@nodejson\t"); nodeEvents != len(proxies) {
+		t.Fatalf("node events=%d, loaded nodes=%d", nodeEvents, len(proxies))
+	}
+	manifestEvents := make([]nodeEvent, 0, len(proxies))
+	for _, line := range strings.Split(manifest.String(), "\n") {
+		if !strings.HasPrefix(line, "@nodejson\t") {
+			continue
+		}
+		body, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(line, "@nodejson\t"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var event nodeEvent
+		if err := json.Unmarshal(body, &event); err != nil {
+			t.Fatal(err)
+		}
+		manifestEvents = append(manifestEvents, event)
+	}
+	wantOrder := []string{"[p] node", "[p] node [2]", "[p] node [3]", "[p] node [4]"}
+	if len(manifestEvents) != len(wantOrder) {
+		t.Fatalf("decoded node events=%d, want %d", len(manifestEvents), len(wantOrder))
+	}
+	for index, event := range manifestEvents {
+		if event.Name != wantOrder[index] {
+			t.Fatalf("manifest node order[%d]=%q, want %q", index, event.Name, wantOrder[index])
+		}
+		if event.ID != manifestIDs[event.Name] {
+			t.Fatalf("manifest event ID for %q=%q, want %q", event.Name, event.ID, manifestIDs[event.Name])
+		}
+		if event.Config["name"] != event.Name {
+			t.Fatalf("manifest event config name=%v, want %q", event.Config["name"], event.Name)
+		}
+		if event.ShareURL == "" || event.ShareError != "" {
+			t.Fatalf("valid manifest node %q was omitted or rejected: %q", event.Name, event.ShareError)
+		}
+	}
+	for name, wantID := range wantIDs {
+		if manifestIDs[name] != wantID {
+			t.Fatalf("manifest stable ID for %q=%q, want %q", name, manifestIDs[name], wantID)
+		}
+	}
+
+	results := make([]*speedtester.Result, 0, len(proxies))
+	for name, proxy := range proxies {
+		results = append(results, &speedtester.Result{
+			ProxyName:               name,
+			ProxyType:               proxy.Type().String(),
+			ProxyConfig:             proxy.Config,
+			Latency:                 time.Millisecond,
+			HTTPProbeFailurePercent: 0,
+		})
+	}
+	exportPath := filepath.Join(directory, "export.yaml")
+	previousOutputPath := *outputPath
+	*outputPath = exportPath
+	t.Cleanup(func() { *outputPath = previousOutputPath })
+	if err := saveConfig(results, speedtester.SpeedModeFast); err != nil {
+		t.Fatal(err)
+	}
+	exportedBody, err := os.ReadFile(exportPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var exported speedtester.RawConfig
+	if err := yaml.Unmarshal(exportedBody, &exported); err != nil {
+		t.Fatal(err)
+	}
+	if len(exported.Proxies) != len(proxies) {
+		t.Fatalf("exported YAML nodes=%d, loaded nodes=%d", len(exported.Proxies), len(proxies))
 	}
 }
 
