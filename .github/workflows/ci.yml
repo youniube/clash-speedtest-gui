@@ -1,0 +1,48 @@
+name: CI
+
+'on':
+  pull_request:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Windows build and tests
+    runs-on: windows-2022
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: tools/speedtest-runner/go.mod
+          cache-dependency-path: |
+            tools/subscription-parser/go.sum
+            tools/speedtest-runner/go.sum
+
+      - name: Build and test
+        shell: powershell
+        run: .\test-all.ps1
+
+      - name: Verify tracked files are unchanged
+        shell: powershell
+        run: |
+          $changes = git status --short --untracked-files=no
+          if ($changes) {
+            $changes
+            throw 'Build or tests changed tracked files.'
+          }
