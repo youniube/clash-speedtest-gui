@@ -1,6 +1,10 @@
+param(
+    [string] $GuiPath
+)
+
 $ErrorActionPreference = 'Stop'
 
-$fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1')
+$fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1') -GuiPath $GuiPath
 $previousRoot = $env:CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT
 
 try {
@@ -11,9 +15,33 @@ try {
         [Text.UTF8Encoding]::new($false))
 
     $runner = Join-Path $fixture.Sandbox 'speedtest-runner.exe'
+    $prepareRequestPath = Join-Path $fixture.Sandbox 'temp\prepare-sources.json'
+    $prepareRequest = @{
+        version = 1
+        sources = @(@{
+            path = $fixture.Input
+            origin = 'local'
+            local_dependency = $fixture.Input
+        })
+    } | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText(
+        $prepareRequestPath,
+        $prepareRequest,
+        [Text.UTF8Encoding]::new($false))
+    $prepared = (& $runner -prepare-sources $prepareRequestPath) | ConvertFrom-Json
+    $preparedConfigs = @($prepared.config_paths)
+    $preparedDependencies = @($prepared.local_dependencies)
+    if ($LASTEXITCODE -ne 0 -or $prepared.version -ne 1 `
+        -or $preparedConfigs.Count -ne 1 `
+        -or -not (Test-Path -LiteralPath $preparedConfigs[0]) `
+        -or $preparedDependencies.Count -ne 1 `
+        -or $preparedDependencies[0] -ne $fixture.Input) {
+        throw 'Fixture Provider source preparation returned an unexpected result.'
+    }
+
     $speedLog = Join-Path $fixture.Sandbox 'work\speed.log'
     & $runner `
-        -c $fixture.Input `
+        -c $preparedConfigs[0] `
         -speed-mode download `
         -output $fixture.Output *> $speedLog
     if ($LASTEXITCODE -ne 0) {

@@ -19,9 +19,9 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyVersion("2.1.0.0")]
-[assembly: AssemblyFileVersion("2.1.0.0")]
-[assembly: AssemblyInformationalVersion("2.1.0")]
+[assembly: AssemblyVersion("2.2.0.0")]
+[assembly: AssemblyFileVersion("2.2.0.0")]
+[assembly: AssemblyInformationalVersion("2.2.0")]
 
 namespace ClashSpeedTestGUI
 {
@@ -280,6 +280,99 @@ namespace ClashSpeedTestGUI
         public string UserAgent;
     }
 
+    internal sealed class SourcePreparationInput
+    {
+        public string path { get; set; }
+        public string origin { get; set; }
+        public string local_dependency { get; set; }
+    }
+
+    internal sealed class SourcePreparationRequest
+    {
+        public int version { get; set; }
+        public SourcePreparationInput[] sources { get; set; }
+    }
+
+    internal sealed class PreparedConfigSources
+    {
+        public string ConfigPaths;
+        public List<string> LocalDependencies;
+    }
+
+    internal static class SourcePreparationProtocol
+    {
+        public const int Version = 1;
+
+        public static PreparedConfigSources Parse(string json, string preparedDirectory)
+        {
+            JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            Dictionary<string, object> envelope = serializer.DeserializeObject(json)
+                as Dictionary<string, object>;
+            if (envelope == null || !HasExactKeys(envelope,
+                new[] { "version", "config_paths", "local_dependencies" }))
+            {
+                throw new InvalidOperationException("Provider 预备结果字段不完整或包含未知字段。");
+            }
+            if (!(envelope["version"] is int) || (int)envelope["version"] != Version)
+            {
+                throw new InvalidOperationException("Provider 预备结果协议版本不兼容。");
+            }
+
+            object[] rawConfigPaths = envelope["config_paths"] as object[];
+            object[] rawDependencies = envelope["local_dependencies"] as object[];
+            if (rawConfigPaths == null || rawConfigPaths.Length == 0 || rawDependencies == null)
+            {
+                throw new InvalidOperationException("Provider 预备结果路径列表无效。");
+            }
+
+            string preparedRoot = Path.GetFullPath(preparedDirectory);
+            List<string> configPaths = ParsePaths(rawConfigPaths, "测速配置");
+            foreach (string configPath in configPaths)
+            {
+                if (!IsWithinDirectory(configPath, preparedRoot) || !File.Exists(configPath))
+                    throw new InvalidOperationException("Provider 预备结果包含无效的测速配置路径。");
+            }
+            List<string> dependencies = ParsePaths(rawDependencies, "本地依赖");
+            return new PreparedConfigSources
+            {
+                ConfigPaths = string.Join(",", configPaths.ToArray()),
+                LocalDependencies = dependencies
+            };
+        }
+
+        private static List<string> ParsePaths(object[] values, string label)
+        {
+            List<string> result = new List<string>(values.Length);
+            HashSet<string> seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (object raw in values)
+            {
+                string value = raw as string;
+                if (string.IsNullOrWhiteSpace(value) || !Path.IsPathRooted(value))
+                    throw new InvalidOperationException("Provider 预备结果中的" + label + "路径无效。");
+                string fullPath = Path.GetFullPath(value);
+                if (!seen.Add(fullPath))
+                    throw new InvalidOperationException("Provider 预备结果包含重复的" + label + "路径。");
+                result.Add(fullPath);
+            }
+            return result;
+        }
+
+        private static bool IsWithinDirectory(string path, string directory)
+        {
+            string fullPath = Path.GetFullPath(path);
+            string root = directory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
+                + Path.DirectorySeparatorChar;
+            return fullPath.StartsWith(root, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool HasExactKeys(
+            Dictionary<string, object> value, IEnumerable<string> expectedKeys)
+        {
+            HashSet<string> expected = new HashSet<string>(expectedKeys, StringComparer.Ordinal);
+            return value.Count == expected.Count && value.Keys.All(expected.Contains);
+        }
+    }
+
     internal sealed class SpeedPreset
     {
         public string Mode;
@@ -373,6 +466,26 @@ namespace ClashSpeedTestGUI
         public string RegionEmoji;
         public string RegionError;
         public bool Exported;
+    }
+
+    internal static class NodeUrlCopyPolicy
+    {
+        public static bool TryCommit(IList<NodeSnapshot> nodes, Action<string, int> commit,
+            out List<NodeSnapshot> unavailable)
+        {
+            if (nodes == null) throw new ArgumentNullException("nodes");
+            if (commit == null) throw new ArgumentNullException("commit");
+            unavailable = nodes.Where(delegate(NodeSnapshot node)
+            {
+                return node == null || string.IsNullOrWhiteSpace(node.ShareUrl);
+            }).ToList();
+            if (unavailable.Count > 0) return false;
+
+            string value = string.Join(Environment.NewLine,
+                nodes.Select(delegate(NodeSnapshot node) { return node.ShareUrl; }).ToArray());
+            commit(value, nodes.Count);
+            return true;
+        }
     }
 
     internal sealed class NodeListFilterCriteria
@@ -2141,25 +2254,21 @@ namespace ClashSpeedTestGUI
         {
             List<NodeSnapshot> nodes = GetSelectedNodes();
             if (nodes.Count == 0) return;
-            List<NodeSnapshot> unavailable = nodes.Where(delegate(NodeSnapshot node)
+            List<NodeSnapshot> unavailable;
+            if (NodeUrlCopyPolicy.TryCommit(nodes, delegate(string value, int count)
             {
-                return string.IsNullOrWhiteSpace(node.ShareUrl);
-            }).ToList();
-            if (unavailable.Count > 0)
-            {
-                string names = string.Join("、", unavailable.Take(5)
-                    .Select(delegate(NodeSnapshot node) { return node.Name; }).ToArray());
-                if (unavailable.Count > 5) names += " 等 " + unavailable.Count + " 个节点";
-                string reason = unavailable[0].ShareError;
-                MessageBox.Show(this,
-                    "以下节点不能安全生成分享 URL，因此没有修改剪贴板：\n\n" + names
-                    + (string.IsNullOrWhiteSpace(reason) ? "" : "\n\n原因：" + reason),
-                    "无法复制节点 URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-            SetNodeClipboard(string.Join(Environment.NewLine,
-                nodes.Select(delegate(NodeSnapshot node) { return node.ShareUrl; }).ToArray()),
-                "已复制 " + nodes.Count + " 个节点 URL");
+                SetNodeClipboard(value, "已复制 " + count + " 个节点 URL");
+            }, out unavailable)) return;
+
+            string names = string.Join("、", unavailable.Take(5)
+                .Select(delegate(NodeSnapshot node) { return node == null ? "（未知节点）" : node.Name; })
+                .ToArray());
+            if (unavailable.Count > 5) names += " 等 " + unavailable.Count + " 个节点";
+            string reason = unavailable[0] == null ? "" : unavailable[0].ShareError;
+            MessageBox.Show(this,
+                "以下节点不能安全生成分享 URL，因此没有修改剪贴板：\n\n" + names
+                + (string.IsNullOrWhiteSpace(reason) ? "" : "\n\n原因：" + reason),
+                "无法复制节点 URL", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         private void CopySelectedNodeMeta()
@@ -3345,8 +3454,10 @@ namespace ClashSpeedTestGUI
                 return;
             }
 
-            RunOptions options;
+            RunOptions options = null;
             TaskOperation operation = null;
+            PreparedConfigSources preparedSources = null;
+            string preparedDirectory = null;
             try
             {
                 options = CaptureRunOptions();
@@ -3362,33 +3473,6 @@ namespace ClashSpeedTestGUI
                 return;
             }
 
-            if (File.Exists(options.OutputPath))
-            {
-                DialogResult overwrite = MessageBox.Show(
-                    this,
-                    "输出文件已存在：\n" + options.OutputPath + "\n\n是否覆盖？",
-                    "确认覆盖",
-                    MessageBoxButtons.YesNo,
-                    MessageBoxIcon.Question);
-                if (overwrite != DialogResult.Yes)
-                {
-                    return;
-                }
-            }
-
-            try
-            {
-                Directory.CreateDirectory(Path.GetDirectoryName(options.OutputPath));
-                options.CoreOutputPath = Path.Combine(
-                    Path.GetDirectoryName(options.OutputPath),
-                    "." + Path.GetFileName(options.OutputPath) + ".cstgui-" + Guid.NewGuid().ToString("N") + ".tmp.yaml");
-                SaveSettingsFromControls();
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show(this, ex.Message, "准备测速失败", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                return;
-            }
             try
             {
                 operation = BeginTaskOperation(TaskOperationKind.SpeedTest);
@@ -3411,10 +3495,43 @@ namespace ClashSpeedTestGUI
                 resultGrid.Rows.Clear();
                 currentHeaders = BuildHeaders(options.SpeedMode);
                 ConfigureResultColumns(currentHeaders);
+                SetStatus("正在解析输入和验证 Provider 来源…");
+
+                preparedSources = await Task.Run(delegate
+                {
+                    return PrepareConfigSources(options, out preparedDirectory, operation);
+                }, operation.Token);
+                operation.Token.ThrowIfCancellationRequested();
+                EnsureOutputPathSafe(options, preparedSources.LocalDependencies);
+
+                if (File.Exists(options.OutputPath))
+                {
+                    DialogResult overwrite = MessageBox.Show(
+                        this,
+                        "输出文件已存在：\n" + options.OutputPath + "\n\n是否覆盖？",
+                        "确认覆盖",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question);
+                    if (overwrite != DialogResult.Yes)
+                    {
+                        SetStatus("已取消；本地输出未修改");
+                        return;
+                    }
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(options.OutputPath));
+                options.CoreOutputPath = Path.Combine(
+                    Path.GetDirectoryName(options.OutputPath),
+                    "." + Path.GetFileName(options.OutputPath) + ".cstgui-"
+                        + Guid.NewGuid().ToString("N") + ".tmp.yaml");
+                SaveSettingsFromControls();
                 nodeUiTimer.Start();
                 SetStatus("正在启动测速内核…");
 
-                RunResult result = await Task.Run(delegate { return RunCore(options, operation); }, operation.Token);
+                RunResult result = await Task.Run(delegate
+                {
+                    return RunCore(options, operation, preparedSources);
+                }, operation.Token);
                 nodeUiTimer.Stop();
                 operation.Token.ThrowIfCancellationRequested();
                 await FlushAllPendingNodeUiEventsAsync(operation);
@@ -3485,7 +3602,11 @@ namespace ClashSpeedTestGUI
                         passedRowCount = result.PassedRows;
                     }
                     operation.Token.ThrowIfCancellationRequested();
-                    AtomicFile.Commit(options.CoreOutputPath, options.OutputPath);
+                    ProtectedOutputCommit.Commit(
+                        options.CoreOutputPath,
+                        options.OutputPath,
+                        preparedSources.LocalDependencies,
+                        new[] { Application.ExecutablePath, parserPath, runnerPath });
                     operation.OutputCommitted = true;
                     UpdateOutputActionState();
                     operation.Token.ThrowIfCancellationRequested();
@@ -3602,120 +3723,112 @@ namespace ClashSpeedTestGUI
                 {
                     CleanupTempFile(options.CoreOutputPath);
                 }
+                CleanupPreparedDirectory(preparedDirectory);
                 activeOptions = null;
                 if (operation != null) EndTaskOperation(operation);
             }
         }
 
-        private RunResult RunCore(RunOptions options, TaskOperation operation)
+        private RunResult RunCore(
+            RunOptions options, TaskOperation operation, PreparedConfigSources preparedSources)
         {
-            string preparedDirectory = null;
-            try
+            operation.Token.ThrowIfCancellationRequested();
+            ProcessStartInfo startInfo = new ProcessStartInfo
             {
-                operation.Token.ThrowIfCancellationRequested();
-                string preparedSources = PrepareConfigSources(options, out preparedDirectory, operation);
-                operation.Token.ThrowIfCancellationRequested();
-                ProcessStartInfo startInfo = new ProcessStartInfo
+                FileName = runnerPath,
+                Arguments = BuildArguments(options, preparedSources.ConfigPaths),
+                WorkingDirectory = baseDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            StringBuilder errors = new StringBuilder();
+            object protocolErrorSync = new object();
+            string protocolError = "";
+            RunnerProtocolValidator validator =
+                new RunnerProtocolValidator(BuildHeaders(options.SpeedMode));
+            using (Process process = new Process { StartInfo = startInfo })
+            {
+                process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
                 {
-                    FileName = runnerPath,
-                    Arguments = BuildArguments(options, preparedSources),
-                    WorkingDirectory = baseDirectory,
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    StandardOutputEncoding = Encoding.UTF8,
-                    StandardErrorEncoding = Encoding.UTF8
+                    if (e.Data == null || operation.IsCancellationRequested) return;
+                    lock (protocolErrorSync)
+                    {
+                        if (!string.IsNullOrWhiteSpace(protocolError)) return;
+                    }
+                    try
+                    {
+                        operation.Token.ThrowIfCancellationRequested();
+                        HandleOutputLine(e.Data, validator, operation);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                    }
+                    catch (Exception ex)
+                    {
+                        lock (protocolErrorSync)
+                        {
+                            if (string.IsNullOrWhiteSpace(protocolError))
+                                protocolError = "内核输出协议错误：" + ex.Message;
+                        }
+                        ChildProcessLifetime.TryKill(process);
+                    }
+                };
+                process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                {
+                    if (!string.IsNullOrWhiteSpace(e.Data))
+                    {
+                        lock (errors)
+                        {
+                            errors.AppendLine(e.Data);
+                        }
+                        SetStatusThreadSafe(e.Data, operation);
+                    }
                 };
 
-                StringBuilder errors = new StringBuilder();
-                object protocolErrorSync = new object();
-                string protocolError = "";
-                RunnerProtocolValidator validator =
-                    new RunnerProtocolValidator(BuildHeaders(options.SpeedMode));
-                using (Process process = new Process { StartInfo = startInfo })
+                using (ChildProcessLease lease =
+                    ChildProcessLifetime.Start(process, operation.Token))
                 {
-                    process.OutputDataReceived += delegate(object sender, DataReceivedEventArgs e)
-                    {
-                        if (e.Data == null || operation.IsCancellationRequested) return;
-                        lock (protocolErrorSync)
-                        {
-                            if (!string.IsNullOrWhiteSpace(protocolError)) return;
-                        }
-                        try
-                        {
-                            operation.Token.ThrowIfCancellationRequested();
-                            HandleOutputLine(e.Data, validator, operation);
-                        }
-                        catch (OperationCanceledException)
-                        {
-                        }
-                        catch (Exception ex)
-                        {
-                            lock (protocolErrorSync)
-                            {
-                                if (string.IsNullOrWhiteSpace(protocolError))
-                                    protocolError = "内核输出协议错误：" + ex.Message;
-                            }
-                            ChildProcessLifetime.TryKill(process);
-                        }
-                    };
-                    process.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
-                    {
-                        if (!string.IsNullOrWhiteSpace(e.Data))
-                        {
-                            lock (errors)
-                            {
-                                errors.AppendLine(e.Data);
-                            }
-                            SetStatusThreadSafe(e.Data, operation);
-                        }
-                    };
+                    process.BeginOutputReadLine();
+                    process.BeginErrorReadLine();
+                    process.WaitForExit();
+                    int exitCode = process.ExitCode;
+                    process.WaitForExit();
+                    lease.Complete();
+                    operation.Token.ThrowIfCancellationRequested();
 
-                    using (ChildProcessLease lease =
-                        ChildProcessLifetime.Start(process, operation.Token))
+                    lock (protocolErrorSync)
                     {
-                        process.BeginOutputReadLine();
-                        process.BeginErrorReadLine();
-                        process.WaitForExit();
-                        int exitCode = process.ExitCode;
-                        process.WaitForExit();
-                        lease.Complete();
-                        operation.Token.ThrowIfCancellationRequested();
-
-                        lock (protocolErrorSync)
+                        if (string.IsNullOrWhiteSpace(protocolError) && exitCode == 0)
                         {
-                            if (string.IsNullOrWhiteSpace(protocolError) && exitCode == 0)
+                            try
                             {
-                                try
-                                {
-                                    validator.ValidateCompletion();
-                                }
-                                catch (Exception ex)
-                                {
-                                    protocolError = "内核输出协议错误：" + ex.Message;
-                                }
+                                validator.ValidateCompletion();
+                            }
+                            catch (Exception ex)
+                            {
+                                protocolError = "内核输出协议错误：" + ex.Message;
                             }
                         }
-
-                        return new RunResult
-                        {
-                            ExitCode = exitCode,
-                            ErrorText = errors.ToString().Trim(),
-                            TotalRows = validator.ResultCount,
-                            PassedRows = passedRowCount,
-                            ProtocolError = protocolError
-                        };
                     }
+
+                    return new RunResult
+                    {
+                        ExitCode = exitCode,
+                        ErrorText = errors.ToString().Trim(),
+                        TotalRows = validator.ResultCount,
+                        PassedRows = passedRowCount,
+                        ProtocolError = protocolError
+                    };
                 }
-            }
-            finally
-            {
-                CleanupPreparedDirectory(preparedDirectory);
             }
         }
 
-        private string PrepareConfigSources(
+        private PreparedConfigSources PrepareConfigSources(
             RunOptions options, out string preparedDirectory, TaskOperation operation)
         {
             operation.Token.ThrowIfCancellationRequested();
@@ -3724,12 +3837,30 @@ namespace ClashSpeedTestGUI
             Directory.CreateDirectory(preparedDirectory);
 
             List<string> sources = SubscriptionUrl.GetSources(options.ConfigSource);
-            List<string> prepared = new List<string>();
+            List<SourcePreparationInput> prepared = new List<SourcePreparationInput>();
             int outputIndex = 0;
             for (int i = 0; i < sources.Count;)
             {
                 operation.Token.ThrowIfCancellationRequested();
                 string source = sources[i];
+                string sourceOrigin;
+                string localDependency = null;
+                if (SubscriptionUrl.IsInlineNode(source))
+                {
+                    sourceOrigin = "inline";
+                }
+                else if (source.StartsWith("http://", StringComparison.OrdinalIgnoreCase)
+                    || source.StartsWith("https://", StringComparison.OrdinalIgnoreCase))
+                {
+                    sourceOrigin = "remote";
+                }
+                else
+                {
+                    sourceOrigin = "local";
+                    localDependency = Path.GetFullPath(Path.IsPathRooted(source)
+                        ? source
+                        : Path.Combine(baseDirectory, source));
+                }
                 int consumed = 1;
                 if (SubscriptionUrl.IsInlineNode(source))
                 {
@@ -3757,13 +3888,72 @@ namespace ClashSpeedTestGUI
                 string output = Path.Combine(preparedDirectory,
                     string.Format(CultureInfo.InvariantCulture, "config-{0:D3}.yaml", outputIndex + 1));
                 RunSubscriptionParser(source, output, options.UserAgent, operation);
-                prepared.Add(output);
+                prepared.Add(new SourcePreparationInput
+                {
+                    path = output,
+                    origin = sourceOrigin,
+                    local_dependency = localDependency
+                });
                 outputIndex++;
                 i += consumed;
             }
             operation.Token.ThrowIfCancellationRequested();
-            SetStatusThreadSafe("输入解析完成，正在启动测速内核…", operation);
-            return string.Join(",", prepared.ToArray());
+            SetStatusThreadSafe("输入解析完成，正在验证 Provider 来源和本地依赖…", operation);
+            return RunSourcePreparation(prepared, preparedDirectory, options.UserAgent, operation);
+        }
+
+        private PreparedConfigSources RunSourcePreparation(
+            List<SourcePreparationInput> sources,
+            string preparedDirectory,
+            string userAgent,
+            TaskOperation operation)
+        {
+            string requestPath = Path.Combine(preparedDirectory, "source-preparation-request.json");
+            JavaScriptSerializer serializer = new JavaScriptSerializer { MaxJsonLength = int.MaxValue };
+            File.WriteAllText(requestPath, serializer.Serialize(new SourcePreparationRequest
+            {
+                version = SourcePreparationProtocol.Version,
+                sources = sources.ToArray()
+            }), new UTF8Encoding(false));
+
+            List<string> arguments = new List<string>();
+            AddArgument(arguments, "-prepare-sources", requestPath);
+            if (!string.IsNullOrWhiteSpace(userAgent)) AddArgument(arguments, "-ua", userAgent);
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = runnerPath,
+                Arguments = string.Join(" ", arguments.ToArray()),
+                WorkingDirectory = baseDirectory,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                StandardOutputEncoding = Encoding.UTF8,
+                StandardErrorEncoding = Encoding.UTF8
+            };
+
+            using (Process process = new Process { StartInfo = startInfo })
+            using (ChildProcessLease lease = ChildProcessLifetime.Start(process, operation.Token))
+            {
+                Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+                Task<string> errorTask = process.StandardError.ReadToEndAsync();
+                process.WaitForExit();
+                Task.WaitAll(outputTask, errorTask);
+                lease.Complete();
+                operation.Token.ThrowIfCancellationRequested();
+                string standardOutput = outputTask.Result.Trim();
+                string standardError = errorTask.Result.Trim();
+                if (process.ExitCode != 0)
+                {
+                    throw new InvalidOperationException("Provider 来源验证失败："
+                        + (string.IsNullOrWhiteSpace(standardError)
+                            ? "预备程序退出代码 " + process.ExitCode
+                            : standardError));
+                }
+                if (string.IsNullOrWhiteSpace(standardOutput))
+                    throw new InvalidOperationException("Provider 来源验证失败：预备程序没有返回结果。");
+                return SourcePreparationProtocol.Parse(standardOutput, preparedDirectory);
+            }
         }
 
         private void RunSubscriptionParser(
@@ -4402,12 +4592,7 @@ namespace ClashSpeedTestGUI
             {
                 throw new InvalidOperationException("测速地址必须是 http:// 或 https:// 地址。");
             }
-            OutputPathPolicy.EnsureSafe(options.OutputPath, localInputPaths, new[]
-            {
-                Application.ExecutablePath,
-                parserPath,
-                runnerPath
-            });
+            EnsureOutputPathSafe(options, localInputPaths);
             if (options.GistEnabled)
             {
                 if (string.IsNullOrWhiteSpace(options.GistUsername))
@@ -4415,6 +4600,16 @@ namespace ClashSpeedTestGUI
                 if (string.IsNullOrWhiteSpace(options.GistToken))
                     throw new InvalidOperationException("启用 Gist 后必须填写 Token。");
             }
+        }
+
+        private void EnsureOutputPathSafe(RunOptions options, IEnumerable<string> localDependencies)
+        {
+            OutputPathPolicy.EnsureSafe(options.OutputPath, localDependencies, new[]
+            {
+                Application.ExecutablePath,
+                parserPath,
+                runnerPath
+            });
         }
 
         private static void CleanupTempFile(string path)
@@ -5345,6 +5540,19 @@ namespace ClashSpeedTestGUI
         }
     }
 
+    internal static class ProtectedOutputCommit
+    {
+        public static void Commit(
+            string temporaryPath,
+            string destinationPath,
+            IEnumerable<string> localDependencies,
+            IEnumerable<string> protectedPaths)
+        {
+            OutputPathPolicy.EnsureSafe(destinationPath, localDependencies, protectedPaths);
+            AtomicFile.Commit(temporaryPath, destinationPath);
+        }
+    }
+
     internal static class OutputPolicy
     {
         public static bool ShouldCommit(int totalRows, int passedRows)
@@ -5435,21 +5643,35 @@ namespace ClashSpeedTestGUI
                 source = source.Substring(0, fragmentIndex);
             }
 
-            if (source.IndexOf('?') < 0)
+            int queryIndex = source.IndexOf('?');
+            if (queryIndex < 0)
             {
-                int malformedFlag = source.IndexOf("&flag=meta", StringComparison.OrdinalIgnoreCase);
-                if (malformedFlag >= 0)
-                {
-                    source = source.Substring(0, malformedFlag) + "?flag=meta"
-                        + source.Substring(malformedFlag + "&flag=meta".Length);
-                }
+                int malformedFlag = source.IndexOf("&flag=", StringComparison.OrdinalIgnoreCase);
+                if (malformedFlag >= 0) queryIndex = malformedFlag;
             }
 
-            if (!Regex.IsMatch(source, @"(?:[?&])flag=meta(?:&|$)", RegexOptions.IgnoreCase))
+            string path = queryIndex >= 0 ? source.Substring(0, queryIndex) : source;
+            string rawQuery = queryIndex >= 0 ? source.Substring(queryIndex + 1) : "";
+            List<string> queryParts = rawQuery.Split(new[] { '&' }, StringSplitOptions.RemoveEmptyEntries)
+                .Where(delegate(string part) { return !IsFlagParameter(part); })
+                .ToList();
+            queryParts.Add("flag=meta");
+            return path + "?" + string.Join("&", queryParts.ToArray()) + fragment;
+        }
+
+        private static bool IsFlagParameter(string part)
+        {
+            int equalsIndex = part.IndexOf('=');
+            string encodedKey = equalsIndex >= 0 ? part.Substring(0, equalsIndex) : part;
+            try
             {
-                source += source.IndexOf('?') >= 0 ? "&flag=meta" : "?flag=meta";
+                string key = Uri.UnescapeDataString(encodedKey.Replace("+", " "));
+                return string.Equals(key, "flag", StringComparison.OrdinalIgnoreCase);
             }
-            return source + fragment;
+            catch (UriFormatException)
+            {
+                return false;
+            }
         }
     }
 
@@ -5987,6 +6209,16 @@ namespace ClashSpeedTestGUI
                     == "https://example.com/sub?token=x&flag=meta", "已有查询参数订阅");
                 Assert(SubscriptionUrl.NormalizeSources("https://example.com/sub/token&flag=meta")
                     == "https://example.com/sub/token?flag=meta", "错误分隔符修复");
+                Assert(SubscriptionUrl.NormalizeSources(
+                    "https://example.com/sub?token=a%2Fb+z&flag=clash#section")
+                    == "https://example.com/sub?token=a%2Fb+z&flag=meta#section",
+                    "已有其他 flag 替换为 meta 且保留 token 编码与片段");
+                Assert(SubscriptionUrl.NormalizeSources(
+                    "https://example.com/sub?flag=clash&token=x&FLAG=Meta")
+                    == "https://example.com/sub?token=x&flag=meta", "重复 flag 去重");
+                Assert(SubscriptionUrl.NormalizeSources(
+                    "https://example.com/sub?%66lag=clash&token=x")
+                    == "https://example.com/sub?token=x&flag=meta", "编码后的 flag 键替换");
                 Assert(SubscriptionUrl.IsInlineNode(
                     "vless://id@example.com:443?security=tls#node"), "单节点链接识别");
                 Assert(!SubscriptionUrl.IsInlineNode(
@@ -6006,6 +6238,7 @@ namespace ClashSpeedTestGUI
                 Assert(commaPath.Count == 2 && commaPath[0].EndsWith("work,travel.yaml"),
                     "Windows 文件名中的逗号原样保留，每行一个输入");
                 TestOutputPathPolicy();
+                TestSourcePreparationProtocol();
                 Assert(!OutputPolicy.ShouldCommit(10, 0), "空结果不覆盖输出");
                 Assert(OutputPolicy.ShouldCommit(10, 1), "有效结果允许写入");
                 Assert(CompletionStatus.Format(68, 29)
@@ -7109,6 +7342,39 @@ namespace ClashSpeedTestGUI
                 "{\"OutputPath\":\"filtered.yaml\",\"NodeNotes\":{\"stable-id\":\"old\"}}");
             Assert(!settingsSerializer.Serialize(migratedSettings).Contains("NodeNotes"), "旧备注设置清除");
 
+            string clipboard = "original clipboard";
+            int clipboardCommits = 0;
+            List<NodeSnapshot> unavailable;
+            bool partialCopy = NodeUrlCopyPolicy.TryCommit(new[]
+            {
+                new NodeSnapshot { Name = "duplicate", ShareUrl = "share-one" },
+                new NodeSnapshot { Name = "duplicate (2)", ShareError = "无法无损表达连接字段" },
+                new NodeSnapshot { Name = "duplicate (3)", ShareUrl = "share-three" }
+            }, delegate(string value, int count)
+            {
+                clipboardCommits++;
+                clipboard = value;
+            }, out unavailable);
+            Assert(!partialCopy && unavailable.Count == 1 && clipboardCommits == 0
+                && clipboard == "original clipboard",
+                "批量 URL 有一个失败时不调用提交函数且保留原剪贴板");
+
+            bool fullCopy = NodeUrlCopyPolicy.TryCommit(new[]
+            {
+                new NodeSnapshot { Name = "duplicate", ShareUrl = "share-one" },
+                new NodeSnapshot { Name = "duplicate (2)", ShareUrl = "share-two" },
+                new NodeSnapshot { Name = "duplicate (3)", ShareUrl = "share-three" }
+            }, delegate(string value, int count)
+            {
+                Assert(count == 3, "全部合法 URL 的提交数量");
+                clipboardCommits++;
+                clipboard = value;
+            }, out unavailable);
+            Assert(fullCopy && unavailable.Count == 0 && clipboardCommits == 1
+                && clipboard == string.Join(Environment.NewLine,
+                    new[] { "share-one", "share-two", "share-three" }),
+                "全部合法 URL 按当前可见顺序一次提交");
+
             NodeSnapshot valid = new NodeSnapshot
             {
                 Name = "valid",
@@ -7276,6 +7542,94 @@ namespace ClashSpeedTestGUI
                 executableRejected = true;
             }
             Assert(executableRejected, "输出不得覆盖程序文件");
+        }
+
+        private static void TestSourcePreparationProtocol()
+        {
+            string directory = Path.Combine(Path.GetTempPath(),
+                "ClashSpeedTestGUI-ProviderProtocol-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(directory);
+            try
+            {
+                string materialized = Path.Combine(directory, "materialized-001.yaml");
+                string providerDependency = Path.Combine(directory, "nested-provider.yaml");
+                File.WriteAllText(materialized, "proxies: []", new UTF8Encoding(false));
+                JavaScriptSerializer serializer = new JavaScriptSerializer();
+                string json = serializer.Serialize(new
+                {
+                    version = SourcePreparationProtocol.Version,
+                    config_paths = new[] { materialized },
+                    local_dependencies = new[] { providerDependency }
+                });
+
+                PreparedConfigSources parsed = SourcePreparationProtocol.Parse(json, directory);
+                Assert(parsed.ConfigPaths == materialized
+                    && parsed.LocalDependencies.Count == 1
+                    && OutputPathPolicy.SamePath(
+                        parsed.LocalDependencies[0], providerDependency),
+                    "Provider 预备协议返回实际嵌套本地依赖");
+
+                PreparedConfigSources withoutDependencies = SourcePreparationProtocol.Parse(
+                    serializer.Serialize(new
+                    {
+                        version = SourcePreparationProtocol.Version,
+                        config_paths = new[] { materialized },
+                        local_dependencies = new string[0]
+                    }), directory);
+                Assert(withoutDependencies.LocalDependencies.Count == 0,
+                    "纯远程 Provider 预备协议允许空本地依赖列表");
+
+                bool nestedProviderRejected = false;
+                try
+                {
+                    OutputPathPolicy.EnsureSafe(
+                        providerDependency, parsed.LocalDependencies, new string[0]);
+                }
+                catch (InvalidOperationException)
+                {
+                    nestedProviderRejected = true;
+                }
+                Assert(nestedProviderRejected, "输出不得覆盖嵌套 Provider 本地依赖");
+
+                File.WriteAllText(providerDependency, "old-provider", new UTF8Encoding(false));
+                string temporaryOutput = Path.Combine(directory, "commit.tmp.yaml");
+                File.WriteAllText(temporaryOutput, "new-output", new UTF8Encoding(false));
+                bool commitRejected = false;
+                try
+                {
+                    ProtectedOutputCommit.Commit(
+                        temporaryOutput, providerDependency, parsed.LocalDependencies, new string[0]);
+                }
+                catch (InvalidOperationException)
+                {
+                    commitRejected = true;
+                }
+                Assert(commitRejected
+                    && File.ReadAllText(providerDependency, Encoding.UTF8) == "old-provider"
+                    && File.Exists(temporaryOutput),
+                    "最终原子提交前拒绝覆盖嵌套 Provider 并保留旧文件");
+
+                bool unknownFieldRejected = false;
+                try
+                {
+                    SourcePreparationProtocol.Parse(serializer.Serialize(new
+                    {
+                        version = SourcePreparationProtocol.Version,
+                        config_paths = new[] { materialized },
+                        local_dependencies = new[] { providerDependency },
+                        unexpected = true
+                    }), directory);
+                }
+                catch (InvalidOperationException)
+                {
+                    unknownFieldRejected = true;
+                }
+                Assert(unknownFieldRejected, "Provider 预备协议拒绝未知字段");
+            }
+            finally
+            {
+                if (Directory.Exists(directory)) Directory.Delete(directory, true);
+            }
         }
 
         private static void TestGistSelection()

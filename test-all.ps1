@@ -1,5 +1,6 @@
 param(
     [switch] $IncludeWinFormsUI,
+    [switch] $IncludeProductionE2E,
     [switch] $SkipBuild
 )
 
@@ -45,6 +46,12 @@ Invoke-Step "UI fixture node-management contract" {
 if ($IncludeWinFormsUI) {
     Invoke-Step "FlaUI WinForms operation test" {
         & (Join-Path $root 'tests\ui\test-winforms-ui.ps1')
+    }
+}
+
+if ($IncludeProductionE2E) {
+    Invoke-Step "Production GUI-parser-runner E2E test" {
+        & (Join-Path $root 'tests\ui\test-production-e2e.ps1')
     }
 }
 
