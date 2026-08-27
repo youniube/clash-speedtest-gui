@@ -56,7 +56,7 @@ $env:CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT = $sandbox
 
 环境变量 `CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT` 是必填项，且目录必须已经存在。
 
-- parser 输入、parser 输出、runner 配置、runner 输出、`-list-config` 输入和地区请求都必须位于该目录内。
+- parser 输入、parser 输出、Provider 预备请求及其配置/依赖、runner 配置、runner 输出、`-list-config` 输入和地区请求都必须位于该目录内。
 - parser 拒绝读取沙箱外的输入；runner 也拒绝读取或写入沙箱外的路径。
 - 夹具不会读取项目根目录的 `cs.yaml`、`wa.yaml` 或 `filtered.yaml`。
 - 夹具没有任何 HTTP、DNS、代理或 Gist 调用。
@@ -122,9 +122,10 @@ UI 自动化启动 GUI 时，还应把 `TEMP` 和 `TMP` 指向沙箱内目录，
 
 ## runner 调用覆盖
 
-夹具识别 GUI 当前使用的三种 runner 入口：
+夹具识别 GUI 当前使用的四种 runner 入口：
 
 ```text
+speedtest-runner.exe -prepare-sources <request.json>
 speedtest-runner.exe -c <prepared.yaml> ... -speed-mode <mode> -output <temporary.yaml>
 speedtest-runner.exe -list-config <temporary-or-final.yaml>
 speedtest-runner.exe -c <final.yaml> -region-query <request.json>
@@ -149,3 +150,19 @@ speedtest-runner.exe -c <final.yaml> -region-query <request.json>
 测试通过稳定 Automation ID 驱动主窗口，并处理 WinForms 原生完成、失败、保存和删除确认弹窗；实际覆盖 `F5` 启动、运行态控件锁定、`Esc` 停止且不提交输出、状态/协议筛选、延迟排序、`F6` 地区查询、地区取消回滚、成功整批提交、畸形协议回滚，以及最后的重命名 A、删除 B 和 YAML 复核。结果表和右键菜单使用窗口内相对坐标定位，以避开 Windows 10 上 FlaUI 高层 `DataGridView` 行枚举可能阻塞的问题。
 
 截图优先调用 `PrintWindow(PW_RENDERFULLCONTENT)`，失败或得到空白图像时回退到屏幕区域 `BitBlt`，不依赖会报 `SetIsBorderRequired 0x80004002` 的 Computer Use 捕获链。首次执行会下载并校验固定版本 FlaUI 包，缓存在 `%LOCALAPPDATA%\ClashSpeedTestGUI\test-tools\FlaUI\5.0.0\`；不会安装系统组件、注册快捷键或操作 PixPin。成功截图和日志位于 `tests\ui\artifacts\`，失败时同目录保留追踪和截图用于排查。
+
+## 正式三进程端到端回归
+
+夹具操作回归会模拟相邻进程，因此不能证明发布用 parser/runner 的实际组合。需要验收根目录三个正式 EXE 时执行：
+
+```powershell
+.\test-all.ps1 -SkipBuild -IncludeProductionE2E
+```
+
+也可以只运行这部分：
+
+```powershell
+.\tests\ui\test-production-e2e.ps1
+```
+
+脚本会把三个正式 EXE 按原 SHA-256 复制进独立 `%TEMP%` 沙箱，并通过 FlaUI 驱动真实 GUI。成功场景使用两个仅监听回环地址的最小 SOCKS5 探测端，验证 `GUI → subscription-parser → speedtest-runner` 保留 Provider 内两个原始同名节点、产生两个完整结果并导出；失败场景分别验证混合 URI 坏行在 parser 阶段失败、灾难性 Provider 正则在测速 runner 加载节点阶段限时失败，且两者都不改写旧输出。各场景通过 parser 配置、Provider 物化配置、测速内核临时输出及阶段专属错误核对实际执行边界；结束时同时检查任务临时目录、内核临时输出、沙箱残留进程和根目录三个 EXE 哈希。测试不访问外网，也不会读取真实用户设置或订阅。

@@ -2,15 +2,19 @@ package speedtester
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
-	"log"
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
+	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -18,9 +22,14 @@ import (
 	"time"
 
 	"github.com/dlclark/regexp2"
+	mihomoTransportHTTP "github.com/metacubex/http"
 	"github.com/metacubex/mihomo/adapter"
 	"github.com/metacubex/mihomo/adapter/provider"
+	"github.com/metacubex/mihomo/common/convert"
+	mihomoCA "github.com/metacubex/mihomo/component/ca"
+	mihomoDialer "github.com/metacubex/mihomo/component/dialer"
 	"github.com/metacubex/mihomo/constant"
+	"github.com/metacubex/mihomo/listener/inner"
 	"gopkg.in/yaml.v2"
 )
 
@@ -39,6 +48,221 @@ type Config struct {
 	Mode                SpeedMode
 	OutputPath          string
 	UserAgent           string // optional; empty means use default (mihomo kernel UA)
+}
+
+type SourceOrigin string
+
+const (
+	SourceOriginLocal  SourceOrigin = "local"
+	SourceOriginRemote SourceOrigin = "remote"
+	SourceOriginInline SourceOrigin = "inline"
+
+	PreparedSourceProtocolVersion = 1
+	providerRegexMatchTimeout     = 250 * time.Millisecond
+)
+
+type ConfigSource struct {
+	Path            string       `json:"path"`
+	Origin          SourceOrigin `json:"origin"`
+	LocalDependency string       `json:"local_dependency,omitempty"`
+}
+
+type httpConfigSizeError struct {
+	limit int64
+}
+
+func (e *httpConfigSizeError) Error() string {
+	return fmt.Sprintf("remote config exceeds %d bytes", e.limit)
+}
+
+type httpConfigStatusError struct {
+	statusCode int
+	summary    string
+}
+
+func (e *httpConfigStatusError) Error() string {
+	return fmt.Sprintf("server returned %d %s: %s",
+		e.statusCode, http.StatusText(e.statusCode), e.summary)
+}
+
+type providerNetworkBlockedError struct{}
+
+func (*providerNetworkBlockedError) Error() string {
+	return "private or local network destination"
+}
+
+type providerRedirectBlockedError struct {
+	reason string
+}
+
+func (e *providerRedirectBlockedError) Error() string {
+	return e.reason
+}
+
+type restrictedProviderDialer struct {
+	lookupNetIP func(context.Context, string, string) ([]netip.Addr, error)
+	dialContext func(context.Context, string, string) (net.Conn, error)
+}
+
+func newRestrictedProviderDialer() constant.Dialer {
+	return &restrictedProviderDialer{
+		lookupNetIP: net.DefaultResolver.LookupNetIP,
+		dialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			return mihomoDialer.DialContext(ctx, network, address)
+		},
+	}
+}
+
+func (d *restrictedProviderDialer) DialContext(
+	ctx context.Context,
+	network string,
+	address string,
+) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, fmt.Errorf("invalid Provider destination: %w", err)
+	}
+
+	addresses := make([]netip.Addr, 0, 2)
+	if literal, parseErr := netip.ParseAddr(host); parseErr == nil {
+		addresses = append(addresses, literal)
+	} else {
+		addresses, err = d.lookupNetIP(ctx, "ip", host)
+		if err != nil {
+			return nil, fmt.Errorf("resolve Provider destination: %w", err)
+		}
+	}
+
+	var lastDialErr error
+	for _, candidate := range addresses {
+		candidate = candidate.Unmap()
+		if !isPublicProviderAddress(candidate) || !networkSupportsAddress(network, candidate) {
+			continue
+		}
+		conn, dialErr := d.dialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastDialErr = dialErr
+	}
+	if lastDialErr != nil {
+		return nil, lastDialErr
+	}
+	return nil, &providerNetworkBlockedError{}
+}
+
+func (d *restrictedProviderDialer) ListenPacket(
+	context.Context,
+	string,
+	string,
+	netip.AddrPort,
+) (net.PacketConn, error) {
+	return nil, fmt.Errorf("packet connections are not supported for Provider downloads")
+}
+
+func networkSupportsAddress(network string, address netip.Addr) bool {
+	if strings.HasSuffix(network, "4") {
+		return address.Is4()
+	}
+	if strings.HasSuffix(network, "6") {
+		return address.Is6()
+	}
+	return true
+}
+
+func isPublicProviderAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	if !address.IsValid() || !address.IsGlobalUnicast() {
+		return false
+	}
+	bestPrefixBits := -1
+	globallyReachable := false
+	for _, rule := range providerSpecialPurposeAddressRules {
+		if rule.prefix.Contains(address) && rule.prefix.Bits() > bestPrefixBits {
+			bestPrefixBits = rule.prefix.Bits()
+			globallyReachable = rule.globallyReachable
+		}
+	}
+	if bestPrefixBits >= 0 {
+		return globallyReachable
+	}
+	return true
+}
+
+type providerSpecialPurposeAddressRule struct {
+	prefix            netip.Prefix
+	globallyReachable bool
+}
+
+// This table mirrors the IANA IPv4 and IPv6 Special-Purpose Address
+// Registries last reviewed on 2025-10-09. Blank and N/A Globally Reachable
+// values fail closed. Longest-prefix matching is required because both
+// registries contain globally reachable exceptions inside broader blocks.
+// IPv4-mapped IPv6 addresses are intentionally unmapped above and evaluated
+// under their embedded IPv4 registry entry.
+//
+// https://www.iana.org/assignments/iana-ipv4-special-registry/
+// https://www.iana.org/assignments/iana-ipv6-special-registry/
+var providerSpecialPurposeAddressRules = []providerSpecialPurposeAddressRule{
+	// IPv4 registry.
+	{netip.MustParsePrefix("0.0.0.0/8"), false},
+	{netip.MustParsePrefix("0.0.0.0/32"), false},
+	{netip.MustParsePrefix("10.0.0.0/8"), false},
+	{netip.MustParsePrefix("100.64.0.0/10"), false},
+	{netip.MustParsePrefix("127.0.0.0/8"), false},
+	{netip.MustParsePrefix("169.254.0.0/16"), false},
+	{netip.MustParsePrefix("172.16.0.0/12"), false},
+	{netip.MustParsePrefix("192.0.0.0/24"), false},
+	{netip.MustParsePrefix("192.0.0.0/29"), false},
+	{netip.MustParsePrefix("192.0.0.8/32"), false},
+	{netip.MustParsePrefix("192.0.0.9/32"), true},
+	{netip.MustParsePrefix("192.0.0.10/32"), true},
+	{netip.MustParsePrefix("192.0.0.170/32"), false},
+	{netip.MustParsePrefix("192.0.0.171/32"), false},
+	{netip.MustParsePrefix("192.0.2.0/24"), false},
+	{netip.MustParsePrefix("192.31.196.0/24"), true},
+	{netip.MustParsePrefix("192.52.193.0/24"), true},
+	{netip.MustParsePrefix("192.88.99.0/24"), false},
+	{netip.MustParsePrefix("192.88.99.2/32"), false},
+	{netip.MustParsePrefix("192.168.0.0/16"), false},
+	{netip.MustParsePrefix("192.175.48.0/24"), true},
+	{netip.MustParsePrefix("198.18.0.0/15"), false},
+	{netip.MustParsePrefix("198.51.100.0/24"), false},
+	{netip.MustParsePrefix("203.0.113.0/24"), false},
+	{netip.MustParsePrefix("240.0.0.0/4"), false},
+	{netip.MustParsePrefix("255.255.255.255/32"), false},
+
+	// IPv6 registry. The ::ffff:0:0/96 entry is handled by Unmap above.
+	{netip.MustParsePrefix("::/128"), false},
+	{netip.MustParsePrefix("::1/128"), false},
+	{netip.MustParsePrefix("64:ff9b::/96"), true},
+	{netip.MustParsePrefix("64:ff9b:1::/48"), false},
+	{netip.MustParsePrefix("100::/64"), false},
+	{netip.MustParsePrefix("100:0:0:1::/64"), false},
+	{netip.MustParsePrefix("2001::/23"), false},
+	{netip.MustParsePrefix("2001::/32"), false},
+	{netip.MustParsePrefix("2001:1::1/128"), true},
+	{netip.MustParsePrefix("2001:1::2/128"), true},
+	{netip.MustParsePrefix("2001:1::3/128"), true},
+	{netip.MustParsePrefix("2001:2::/48"), false},
+	{netip.MustParsePrefix("2001:3::/32"), true},
+	{netip.MustParsePrefix("2001:4:112::/48"), true},
+	{netip.MustParsePrefix("2001:10::/28"), false},
+	{netip.MustParsePrefix("2001:20::/28"), true},
+	{netip.MustParsePrefix("2001:30::/28"), true},
+	{netip.MustParsePrefix("2001:db8::/32"), false},
+	{netip.MustParsePrefix("2002::/16"), false},
+	{netip.MustParsePrefix("2620:4f:8000::/48"), true},
+	{netip.MustParsePrefix("3fff::/20"), false},
+	{netip.MustParsePrefix("5f00::/16"), false},
+	{netip.MustParsePrefix("fc00::/7"), false},
+	{netip.MustParsePrefix("fe80::/10"), false},
+}
+
+type PreparedConfigSet struct {
+	Version           int      `json:"version"`
+	ConfigPaths       []string `json:"config_paths"`
+	LocalDependencies []string `json:"local_dependencies"`
 }
 
 type serverMode int
@@ -70,32 +294,172 @@ func (st *SpeedTester) fetchConfigUA() string {
 }
 
 func (st *SpeedTester) fetchHTTPConfig(targetURL string) ([]byte, error) {
+	return st.fetchHTTPConfigWithOptions(targetURL, nil, maxHTTPConfigSize, nil, false)
+}
+
+func (st *SpeedTester) fetchHTTPConfigWithOptions(
+	targetURL string,
+	headers http.Header,
+	maxSize int64,
+	requestDialer constant.Dialer,
+	secureProviderRedirects bool,
+) ([]byte, error) {
+	if maxSize <= 0 || maxSize > maxHTTPConfigSize {
+		return nil, fmt.Errorf("remote config size limit must be between 1 and %d bytes", maxHTTPConfigSize)
+	}
+	requestHeaders := headers.Clone()
+	if requestHeaders == nil {
+		requestHeaders = make(http.Header)
+	}
+	if requestHeaders.Get("User-Agent") == "" {
+		requestHeaders.Set("User-Agent", st.fetchConfigUA())
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), configFetchTimeout)
 	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, targetURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("User-Agent", st.fetchConfigUA())
-	client := &http.Client{}
-	resp, err := client.Do(req)
+	resp, cleanup, err := st.requestHTTPConfig(
+		ctx, targetURL, requestHeaders, headers, requestDialer, secureProviderRedirects)
+	defer cleanup()
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
 		detail, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("server returned %s: %s", resp.Status, trimHTTPError(string(detail)))
+		return nil, &httpConfigStatusError{
+			statusCode: resp.StatusCode,
+			summary:    trimHTTPError(string(detail)),
+		}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPConfigSize+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSize+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(body) > maxHTTPConfigSize {
-		return nil, fmt.Errorf("remote config exceeds %d bytes", maxHTTPConfigSize)
+	if int64(len(body)) > maxSize {
+		return nil, &httpConfigSizeError{limit: maxSize}
 	}
 	return body, nil
+}
+
+func (st *SpeedTester) requestHTTPConfig(
+	ctx context.Context,
+	targetURL string,
+	requestHeaders http.Header,
+	userHeaders http.Header,
+	requestDialer constant.Dialer,
+	secureProviderRedirects bool,
+) (*mihomoTransportHTTP.Response, func(), error) {
+	parsedURL, err := url.Parse(targetURL)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	req, err := mihomoTransportHTTP.NewRequestWithContext(
+		ctx, http.MethodGet, parsedURL.String(), nil)
+	if err != nil {
+		return nil, func() {}, err
+	}
+	for name, values := range requestHeaders {
+		for _, value := range values {
+			req.Header.Add(name, value)
+		}
+	}
+	if user := parsedURL.User; user != nil {
+		password, _ := user.Password()
+		req.SetBasicAuth(user.Username(), password)
+	}
+
+	tlsConfig, err := mihomoCA.GetTLSConfig(mihomoCA.Option{})
+	if err != nil {
+		return nil, func() {}, err
+	}
+	transport := &mihomoTransportHTTP.Transport{
+		// Keep these values aligned with Mihomo component/http.HttpRequest.
+		DisableKeepAlives:     runtime.GOOS == "android",
+		MaxIdleConns:          100,
+		IdleConnTimeout:       30 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			if requestDialer != nil {
+				return requestDialer.DialContext(ctx, network, address)
+			}
+			if conn, innerErr := inner.HandleTcp(inner.GetTunnel(), address, ""); innerErr == nil {
+				return conn, nil
+			}
+			return mihomoDialer.DialContext(ctx, network, address)
+		},
+		TLSClientConfig: tlsConfig,
+	}
+	client := &mihomoTransportHTTP.Client{Transport: transport}
+	if secureProviderRedirects {
+		client.CheckRedirect = providerRedirectPolicy(
+			parsedURL, len(userHeaders) > 0, st.fetchConfigUA())
+	}
+	resp, requestErr := client.Do(req)
+	return resp, transport.CloseIdleConnections, requestErr
+}
+
+func providerRedirectPolicy(
+	initialURL *url.URL,
+	hasUserHeaders bool,
+	defaultUserAgent string,
+) func(*mihomoTransportHTTP.Request, []*mihomoTransportHTTP.Request) error {
+	strictOrigin := hasUserHeaders || initialURL.User != nil ||
+		initialURL.RawQuery != "" || initialURL.ForceQuery
+	return func(req *mihomoTransportHTTP.Request, via []*mihomoTransportHTTP.Request) error {
+		if len(via) >= 10 {
+			return &providerRedirectBlockedError{reason: "stopped after 10 redirects"}
+		}
+		previous := via[len(via)-1]
+		if strings.EqualFold(previous.URL.Scheme, "https") &&
+			strings.EqualFold(req.URL.Scheme, "http") {
+			return &providerRedirectBlockedError{reason: "HTTPS to HTTP downgrade"}
+		}
+		if !sameURLUserinfo(initialURL.User, req.URL.User) && req.URL.User != nil {
+			return &providerRedirectBlockedError{reason: "redirect changed URL userinfo"}
+		}
+		if strictOrigin {
+			if !sameProviderOrigin(initialURL, req.URL) {
+				return &providerRedirectBlockedError{reason: "credentialed request changed origin"}
+			}
+			return nil
+		}
+		if !sameProviderOrigin(previous.URL, req.URL) {
+			for name := range req.Header {
+				req.Header.Del(name)
+			}
+			if defaultUserAgent != "" {
+				req.Header.Set("User-Agent", defaultUserAgent)
+			}
+			req.Header.Del("Referer")
+		}
+		return nil
+	}
+}
+
+func sameProviderOrigin(first *url.URL, second *url.URL) bool {
+	return strings.EqualFold(first.Scheme, second.Scheme) &&
+		strings.EqualFold(first.Hostname(), second.Hostname()) &&
+		effectiveProviderPort(first) == effectiveProviderPort(second)
+}
+
+func effectiveProviderPort(value *url.URL) string {
+	if port := value.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(value.Scheme, "https") {
+		return "443"
+	}
+	if strings.EqualFold(value.Scheme, "http") {
+		return "80"
+	}
+	return ""
+}
+
+func sameURLUserinfo(first *url.Userinfo, second *url.Userinfo) bool {
+	if first == nil || second == nil {
+		return first == nil && second == nil
+	}
+	return first.String() == second.String()
 }
 
 func trimHTTPError(value string) string {
@@ -116,13 +480,14 @@ type serverTarget struct {
 }
 
 type SpeedTester struct {
-	config           *Config
-	blockedNodes     []string
-	blockedNodeCount int
-	serverMode       serverMode
-	serverBaseURL    string
-	downloadURL      string
-	mode             SpeedMode
+	config               *Config
+	blockedNodes         []string
+	blockedNodeCount     int
+	serverMode           serverMode
+	serverBaseURL        string
+	downloadURL          string
+	mode                 SpeedMode
+	remoteProviderDialer constant.Dialer
 }
 
 func New(config *Config) (*SpeedTester, error) {
@@ -200,13 +565,198 @@ type CProxy struct {
 }
 
 type loadedProxy struct {
-	name  string
-	proxy *CProxy
+	name             string
+	proxy            *CProxy
+	sourceOrder      int
+	sourceOrigin     SourceOrigin
+	sourceIdentifier string
+	providerName     string
+	originalName     string
+	originalConfig   map[string]any
+}
+
+type preparedProviderProxyConfig struct {
+	originalName   string
+	originalConfig map[string]any
+	config         map[string]any
 }
 
 type RawConfig struct {
-	Providers map[string]map[string]any `yaml:"proxy-providers"`
-	Proxies   []map[string]any          `yaml:"proxies"`
+	Providers       map[string]map[string]any `yaml:"proxy-providers"`
+	Proxies         []map[string]any          `yaml:"proxies"`
+	ProviderPayload []map[string]any          `yaml:"payload"`
+}
+
+type providerSourceDefinition struct {
+	typeName  string
+	url       string
+	path      string
+	payload   any
+	headers   http.Header
+	sizeLimit int64
+}
+
+func PrepareConfigSources(
+	sources []ConfigSource,
+	outputDirectory string,
+	userAgent string,
+) (_ *PreparedConfigSet, err error) {
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("source list is empty")
+	}
+	outputDirectory, err = filepath.Abs(strings.TrimSpace(outputDirectory))
+	if err != nil {
+		return nil, fmt.Errorf("resolve prepared output directory: %w", err)
+	}
+	if err := os.MkdirAll(outputDirectory, 0o755); err != nil {
+		return nil, fmt.Errorf("create prepared output directory: %w", err)
+	}
+
+	tester := &SpeedTester{config: &Config{UserAgent: strings.TrimSpace(userAgent)}}
+	preparedPaths := make([]string, 0, len(sources))
+	createdPaths := make([]string, 0, len(sources))
+	dependencies := make([]string, 0, len(sources))
+	dependencyKeys := make(map[string]struct{})
+	succeeded := false
+	defer func() {
+		if succeeded {
+			return
+		}
+		for _, createdPath := range createdPaths {
+			_ = os.Remove(createdPath)
+		}
+	}()
+
+	addDependency := func(path string) error {
+		absolute, absoluteErr := filepath.Abs(strings.TrimSpace(path))
+		if absoluteErr != nil {
+			return absoluteErr
+		}
+		absolute = filepath.Clean(absolute)
+		key := absolute
+		if filepath.Separator == '\\' {
+			key = strings.ToLower(absolute)
+		}
+		if _, exists := dependencyKeys[key]; exists {
+			return nil
+		}
+		dependencyKeys[key] = struct{}{}
+		dependencies = append(dependencies, absolute)
+		return nil
+	}
+
+	for index, rawSource := range sources {
+		source, sourceErr := normalizeConfigSource(rawSource)
+		if sourceErr != nil {
+			return nil, fmt.Errorf("source %d: %w", index+1, sourceErr)
+		}
+		if source.Origin == SourceOriginLocal {
+			if err := addDependency(source.LocalDependency); err != nil {
+				return nil, fmt.Errorf("source %d local dependency: %w", index+1, err)
+			}
+		}
+
+		body, readErr := os.ReadFile(source.Path)
+		if readErr != nil {
+			return nil, fmt.Errorf("source %d prepared config could not be read: %w", index+1, readErr)
+		}
+		rawConfig := &RawConfig{Proxies: []map[string]any{}}
+		if decodeErr := yaml.Unmarshal(body, rawConfig); decodeErr != nil {
+			return nil, fmt.Errorf("source %d prepared config could not be parsed: %w", index+1, decodeErr)
+		}
+		if validationErr := rejectUnsupportedDialerProxyConfigs(
+			fmt.Sprintf("source %d top-level", index+1), rawConfig.Proxies); validationErr != nil {
+			return nil, validationErr
+		}
+
+		providerNames := make([]string, 0, len(rawConfig.Providers))
+		for name := range rawConfig.Providers {
+			providerNames = append(providerNames, name)
+		}
+		sort.Strings(providerNames)
+		for _, name := range providerNames {
+			providerConfig := rawConfig.Providers[name]
+			providerConfigs, dependency, loadErr := tester.loadProviderProxyConfigsFromSource(
+				source, name, providerConfig)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			if dependency != "" {
+				if err := addDependency(dependency); err != nil {
+					return nil, fmt.Errorf("proxy provider %s dependency: %w", name, err)
+				}
+			}
+
+			inlineConfig := cloneProxyConfig(providerConfig)
+			inlineConfig["type"] = "inline"
+			inlineConfig["payload"] = providerConfigs
+			for _, key := range []string{
+				"url", "path", "header", "proxy", "size-limit", "age-secret-key",
+			} {
+				delete(inlineConfig, key)
+			}
+			rawConfig.Providers[name] = inlineConfig
+		}
+
+		materialized, marshalErr := yaml.Marshal(rawConfig)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("source %d prepared config could not be encoded: %w", index+1, marshalErr)
+		}
+		preparedPath := filepath.Join(outputDirectory, fmt.Sprintf("materialized-%03d.yaml", index+1))
+		file, openErr := os.OpenFile(preparedPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		if openErr != nil {
+			return nil, fmt.Errorf("source %d prepared config could not be created: %w", index+1, openErr)
+		}
+		createdPaths = append(createdPaths, preparedPath)
+		if _, writeErr := file.Write(materialized); writeErr != nil {
+			_ = file.Close()
+			return nil, fmt.Errorf("source %d prepared config could not be written: %w", index+1, writeErr)
+		}
+		if closeErr := file.Close(); closeErr != nil {
+			return nil, fmt.Errorf("source %d prepared config could not be closed: %w", index+1, closeErr)
+		}
+		preparedPaths = append(preparedPaths, preparedPath)
+	}
+
+	sort.Strings(dependencies)
+	succeeded = true
+	return &PreparedConfigSet{
+		Version:           PreparedSourceProtocolVersion,
+		ConfigPaths:       preparedPaths,
+		LocalDependencies: dependencies,
+	}, nil
+}
+
+func normalizeConfigSource(source ConfigSource) (ConfigSource, error) {
+	source.Path = strings.TrimSpace(source.Path)
+	if source.Path == "" {
+		return ConfigSource{}, fmt.Errorf("prepared config path is empty")
+	}
+	absolutePath, err := filepath.Abs(source.Path)
+	if err != nil {
+		return ConfigSource{}, fmt.Errorf("resolve prepared config path: %w", err)
+	}
+	source.Path = filepath.Clean(absolutePath)
+	source.LocalDependency = strings.TrimSpace(source.LocalDependency)
+
+	switch source.Origin {
+	case SourceOriginLocal:
+		if source.LocalDependency == "" {
+			return ConfigSource{}, fmt.Errorf("local source dependency is empty")
+		}
+		absoluteDependency, dependencyErr := filepath.Abs(source.LocalDependency)
+		if dependencyErr != nil {
+			return ConfigSource{}, fmt.Errorf("resolve local source dependency: %w", dependencyErr)
+		}
+		source.LocalDependency = filepath.Clean(absoluteDependency)
+	case SourceOriginRemote, SourceOriginInline:
+		if source.LocalDependency != "" {
+			return ConfigSource{}, fmt.Errorf("%s source must not declare a local dependency", source.Origin)
+		}
+	default:
+		return ConfigSource{}, fmt.Errorf("unsupported source origin %q", source.Origin)
+	}
+	return source, nil
 }
 
 func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
@@ -214,21 +764,29 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 	st.blockedNodes = make([]string, 0)
 	st.blockedNodeCount = 0
 
+	sourceOrder := 0
 	for configPath := range strings.SplitSeq(st.config.ConfigPaths, ",") {
+		sourceOrder++
+		configPath = strings.TrimSpace(configPath)
+		if configPath == "" {
+			return nil, fmt.Errorf("config path is empty")
+		}
+		source := ConfigSource{Path: configPath}
 		var body []byte
 		var err error
 		if isHTTPURL(configPath) {
-			body, err = st.fetchHTTPConfig(strings.TrimSpace(configPath))
+			source.Origin = SourceOriginRemote
+			body, err = st.fetchHTTPConfig(configPath)
 			if err != nil {
-				log.Printf("failed to fetch remote config")
-				continue
+				return nil, fmt.Errorf("failed to fetch remote config")
 			}
 		} else {
+			source.Origin = SourceOriginLocal
+			source.LocalDependency = configPath
 			body, err = os.ReadFile(configPath)
 		}
 		if err != nil {
-			log.Printf("failed to read config: %s", err)
-			continue
+			return nil, fmt.Errorf("failed to read config %s: %w", configPath, err)
 		}
 
 		rawCfg := &RawConfig{
@@ -241,51 +799,78 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 			}
 			return nil, fmt.Errorf("unable to parse config at path %s: %w", sourceLabel, err)
 		}
-		proxies := make(map[string]*CProxy)
+		if err := rejectUnsupportedDialerProxyConfigs(
+			fmt.Sprintf("source %d top-level", sourceOrder), rawCfg.Proxies); err != nil {
+			return nil, err
+		}
+		sourceProxies := make([]loadedProxy, 0, len(rawCfg.Proxies))
 		proxiesConfig := rawCfg.Proxies
 		providersConfig := rawCfg.Providers
+		topLevelNames := make(map[string]struct{}, len(proxiesConfig))
 
 		for i, config := range proxiesConfig {
+			originalConfig := cloneProxyConfig(config)
 			proxy, err := adapter.ParseProxy(config)
 			if err != nil {
 				return nil, fmt.Errorf("proxy %d: %w", i, err)
 			}
 
-			if _, exist := proxies[proxy.Name()]; exist {
+			if _, exist := topLevelNames[proxy.Name()]; exist {
 				return nil, fmt.Errorf("proxy %s is the duplicate name", proxy.Name())
 			}
-			proxies[proxy.Name()] = &CProxy{Proxy: proxy, Config: config}
+			topLevelNames[proxy.Name()] = struct{}{}
+			sourceProxies = append(sourceProxies, loadedProxy{
+				name:             proxy.Name(),
+				proxy:            &CProxy{Proxy: proxy, Config: config},
+				sourceOrder:      sourceOrder,
+				sourceOrigin:     source.Origin,
+				sourceIdentifier: source.Path,
+				originalName:     proxy.Name(),
+				originalConfig:   originalConfig,
+			})
 		}
-		for name, config := range providersConfig {
+		providerNames := make([]string, 0, len(providersConfig))
+		for name := range providersConfig {
+			providerNames = append(providerNames, name)
+		}
+		sort.Strings(providerNames)
+		for _, name := range providerNames {
+			config := providersConfig[name]
 			if name == provider.ReservedName {
 				return nil, fmt.Errorf("can not defined a provider called `%s`", provider.ReservedName)
 			}
-			providerURL, ok := stringMapValue(config, "url")
-			if !ok || strings.TrimSpace(providerURL) == "" {
-				log.Printf("skip proxy provider %s: missing url", name)
-				continue
-			}
-			providerURL = strings.TrimSpace(providerURL)
-			body, err = st.fetchHTTPConfig(providerURL)
+			providerProxyConfigs, _, err := st.loadProviderProxyConfigsFromSource(source, name, config)
 			if err != nil {
-				log.Printf("failed to fetch proxy provider %s", name)
-				continue
+				return nil, err
 			}
-			pdRawCfg := &RawConfig{
-				Proxies: []map[string]any{},
+			preparedProviderConfigs, err := prepareProviderProxyConfigEntries(providerProxyConfigs, config)
+			if err != nil {
+				return nil, fmt.Errorf("prepare proxy provider %s configs: %w", name, err)
 			}
-			if err := yaml.Unmarshal(body, pdRawCfg); err != nil {
-				return nil, fmt.Errorf("unable to parse proxy provider %s: %w", name, err)
+			mappedProviderProxyConfigs := make([]map[string]any, len(preparedProviderConfigs))
+			providerParserPayload := make([]map[string]any, len(preparedProviderConfigs))
+			for index, preparedConfig := range preparedProviderConfigs {
+				mappedProviderProxyConfigs[index] = preparedConfig.config
+				parserConfig := cloneProxyConfig(preparedConfig.config)
+				parserConfig["name"] = fmt.Sprintf("__clash_speedtest_provider_item_%d__", index+1)
+				providerParserPayload[index] = parserConfig
 			}
 
 			// Convert the already-fetched response into an inline provider. This
-			// preserves Mihomo's filtering and override behavior without issuing a
-			// second HTTP request that could return a different node set.
+			// keeps Mihomo's proxy construction and Provider validation without
+			// issuing a second HTTP request. Filtering and overrides were already
+			// applied above, so remove them here and give every record an internal
+			// index-based name; Mihomo otherwise drops raw duplicate names.
 			inlineConfig := cloneProxyConfig(config)
 			inlineConfig["type"] = "inline"
-			inlineConfig["payload"] = pdRawCfg.Proxies
+			inlineConfig["payload"] = providerParserPayload
 			delete(inlineConfig, "url")
 			delete(inlineConfig, "path")
+			for _, field := range []string{
+				"filter", "exclude-filter", "exclude-type", "dialer-proxy", "override", "age-secret-key",
+			} {
+				delete(inlineConfig, field)
+			}
 			pd, err := provider.ParseProxyProvider(name, inlineConfig, nil)
 			if err != nil {
 				return nil, fmt.Errorf("parse proxy provider %s error: %w", name, err)
@@ -293,34 +878,37 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 			if closer, ok := pd.(interface{ Close() error }); ok {
 				defer closer.Close()
 			}
-			providerProxyConfigs, err := prepareProviderProxyConfigs(pdRawCfg.Proxies, config)
-			if err != nil {
-				return nil, fmt.Errorf("prepare proxy provider %s configs: %w", name, err)
+			if err := rejectUnsupportedDialerProxyConfigs(
+				fmt.Sprintf("proxy provider %s", name), mappedProviderProxyConfigs); err != nil {
+				return nil, err
 			}
 			providerProxies := pd.Proxies()
-			if len(providerProxies) != len(providerProxyConfigs) {
+			if len(providerProxies) != len(mappedProviderProxyConfigs) {
 				return nil, fmt.Errorf("proxy provider %s returned %d proxies but mapped %d configs",
-					name, len(providerProxies), len(providerProxyConfigs))
+					name, len(providerProxies), len(mappedProviderProxyConfigs))
 			}
 			for index, proxy := range providerProxies {
-				proxyConfig := providerProxyConfigs[index]
+				preparedConfig := preparedProviderConfigs[index]
+				proxyConfig := preparedConfig.config
 				configName, ok := stringMapValue(proxyConfig, "name")
-				if !ok || configName != proxy.Name() {
+				expectedParserName := fmt.Sprintf("__clash_speedtest_provider_item_%d__", index+1)
+				if !ok || proxy.Name() != expectedParserName {
 					return nil, fmt.Errorf("proxy provider %s proxy/config name mismatch at index %d", name, index)
 				}
-				proxies[fmt.Sprintf("[%s] %s", name, proxy.Name())] = &CProxy{
-					Proxy:  proxy,
-					Config: proxyConfig,
-				}
+				sourceProxies = append(sourceProxies, loadedProxy{
+					name:             fmt.Sprintf("[%s] %s", name, configName),
+					proxy:            &CProxy{Proxy: proxy, Config: proxyConfig},
+					sourceOrder:      sourceOrder,
+					sourceOrigin:     source.Origin,
+					sourceIdentifier: source.Path,
+					providerName:     name,
+					originalName:     preparedConfig.originalName,
+					originalConfig:   preparedConfig.originalConfig,
+				})
 			}
 		}
-		names := make([]string, 0, len(proxies))
-		for name := range proxies {
-			names = append(names, name)
-		}
-		sort.Strings(names)
-		for _, name := range names {
-			p := proxies[name]
+		for _, item := range sourceProxies {
+			p := item.proxy
 			if p == nil || p.Config == nil {
 				continue
 			}
@@ -334,7 +922,7 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 			if server, ok := stringMapValue(p.Config, "server"); ok {
 				p.Config["server"] = convertMappedIPv6ToIPv4(server)
 			}
-			loadedProxies = append(loadedProxies, loadedProxy{name: name, proxy: p})
+			loadedProxies = append(loadedProxies, item)
 		}
 	}
 
@@ -370,12 +958,358 @@ func (st *SpeedTester) LoadProxies() (map[string]*CProxy, error) {
 			selectedProxies = append(selectedProxies, item)
 		}
 	}
-	return assignUniqueProxyNames(selectedProxies), nil
+	return assignUniqueProxyNames(selectedProxies)
 }
 
-func assignUniqueProxyNames(proxies []loadedProxy) map[string]*CProxy {
+func (st *SpeedTester) loadProviderProxyConfigsFromSource(
+	source ConfigSource,
+	name string,
+	config map[string]any,
+) ([]map[string]any, string, error) {
+	definition, err := parseProviderSourceDefinition(name, config)
+	if err != nil {
+		return nil, "", err
+	}
+
+	switch definition.typeName {
+	case "http":
+		var requestDialer constant.Dialer
+		if source.Origin != SourceOriginLocal {
+			requestDialer = st.remoteProviderDialer
+			if requestDialer == nil {
+				requestDialer = newRestrictedProviderDialer()
+			}
+		}
+		body, fetchErr := st.fetchHTTPConfigWithOptions(
+			definition.url, definition.headers, definition.sizeLimit, requestDialer, true)
+		if fetchErr != nil {
+			var sizeErr *httpConfigSizeError
+			if errors.As(fetchErr, &sizeErr) {
+				return nil, "", fmt.Errorf(
+					"proxy provider %s response exceeds configured size-limit %d", name, sizeErr.limit)
+			}
+			var statusErr *httpConfigStatusError
+			if errors.As(fetchErr, &statusErr) {
+				return nil, "", fmt.Errorf(
+					"proxy provider %s server returned %d %s",
+					name, statusErr.statusCode, http.StatusText(statusErr.statusCode))
+			}
+			var blockedErr *providerNetworkBlockedError
+			if errors.As(fetchErr, &blockedErr) {
+				return nil, "", fmt.Errorf(
+					"proxy provider %s request blocked: %s", name, blockedErr)
+			}
+			var redirectErr *providerRedirectBlockedError
+			if errors.As(fetchErr, &redirectErr) {
+				return nil, "", fmt.Errorf(
+					"proxy provider %s redirect blocked: %s", name, redirectErr)
+			}
+			return nil, "", fmt.Errorf("failed to fetch proxy provider %s", name)
+		}
+		providerConfigs, parseErr := parseProviderProxyConfigs(name, body)
+		return validateProviderDialerProxyConfigs(name, config, providerConfigs, "", parseErr)
+
+	case "file":
+		if source.Origin != SourceOriginLocal {
+			return nil, "", fmt.Errorf(
+				"proxy provider %s type file is forbidden for %s sources", name, source.Origin)
+		}
+		basePath := source.LocalDependency
+		if basePath == "" {
+			basePath = source.Path
+		}
+		providerPath := definition.path
+		if !filepath.IsAbs(providerPath) {
+			providerPath = filepath.Join(filepath.Dir(basePath), providerPath)
+		}
+		providerPath, err = filepath.Abs(providerPath)
+		if err != nil {
+			return nil, "", fmt.Errorf("resolve proxy provider %s path: %w", name, err)
+		}
+		providerPath = filepath.Clean(providerPath)
+		body, readErr := os.ReadFile(providerPath)
+		if readErr != nil {
+			return nil, "", fmt.Errorf("failed to read proxy provider %s: %w", name, readErr)
+		}
+		providerConfigs, parseErr := parseProviderProxyConfigs(name, body)
+		return validateProviderDialerProxyConfigs(name, config, providerConfigs, providerPath, parseErr)
+
+	case "inline":
+		providerConfigs, payloadErr := providerPayloadProxyConfigs(definition.payload)
+		if payloadErr != nil {
+			return nil, "", fmt.Errorf("unable to parse inline proxy provider %s: %w", name, payloadErr)
+		}
+		return validateProviderDialerProxyConfigs(name, config, providerConfigs, "", nil)
+	default:
+		return nil, "", fmt.Errorf("proxy provider %s has unsupported type %q", name, definition.typeName)
+	}
+}
+
+func parseProviderSourceDefinition(
+	name string,
+	config map[string]any,
+) (*providerSourceDefinition, error) {
+	if config == nil {
+		return nil, fmt.Errorf("proxy provider %s config is empty", name)
+	}
+	typeName, err := requiredProviderString(config, "type")
+	if err != nil {
+		return nil, fmt.Errorf("proxy provider %s: %w", name, err)
+	}
+	if typeName != strings.ToLower(typeName) {
+		return nil, fmt.Errorf("proxy provider %s type must be lowercase", name)
+	}
+
+	definition := &providerSourceDefinition{typeName: typeName, sizeLimit: maxHTTPConfigSize}
+	switch typeName {
+	case "http":
+		if err := rejectProviderFields(name, config, "path", "payload"); err != nil {
+			return nil, err
+		}
+		providerURL, valueErr := requiredProviderString(config, "url")
+		if valueErr != nil {
+			return nil, fmt.Errorf("proxy provider %s: %w", name, valueErr)
+		}
+		parsedURL, parseErr := url.Parse(providerURL)
+		if parseErr != nil || parsedURL.Host == "" ||
+			(parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+			return nil, fmt.Errorf("proxy provider %s url must be an absolute http or https URL", name)
+		}
+		definition.url = providerURL
+
+		if _, exists := config["proxy"]; exists {
+			return nil, fmt.Errorf("proxy provider %s field proxy is not supported; request was not sent", name)
+		}
+		if _, exists := config["age-secret-key"]; exists {
+			return nil, fmt.Errorf(
+				"proxy provider %s field age-secret-key is not supported; request was not sent", name)
+		}
+		if rawHeader, exists := config["header"]; exists {
+			headers, headerErr := parseProviderHeaders(rawHeader)
+			if headerErr != nil {
+				return nil, fmt.Errorf("proxy provider %s header: %w", name, headerErr)
+			}
+			definition.headers = headers
+		}
+		if rawSizeLimit, exists := config["size-limit"]; exists {
+			sizeLimit, sizeErr := strictPositiveInt64(rawSizeLimit)
+			if sizeErr != nil {
+				return nil, fmt.Errorf("proxy provider %s size-limit: %w", name, sizeErr)
+			}
+			if sizeLimit > maxHTTPConfigSize {
+				return nil, fmt.Errorf(
+					"proxy provider %s size-limit exceeds supported maximum %d", name, maxHTTPConfigSize)
+			}
+			definition.sizeLimit = sizeLimit
+		}
+
+	case "file":
+		if err := rejectProviderFields(
+			name, config, "url", "payload", "header", "proxy", "size-limit", "age-secret-key"); err != nil {
+			return nil, err
+		}
+		providerPath, valueErr := requiredProviderString(config, "path")
+		if valueErr != nil {
+			return nil, fmt.Errorf("proxy provider %s: %w", name, valueErr)
+		}
+		definition.path = providerPath
+
+	case "inline":
+		if err := rejectProviderFields(
+			name, config, "url", "path", "header", "proxy", "size-limit", "age-secret-key"); err != nil {
+			return nil, err
+		}
+		payload, exists := config["payload"]
+		if !exists {
+			return nil, fmt.Errorf("proxy provider %s field payload is required for type inline", name)
+		}
+		definition.payload = payload
+
+	default:
+		return nil, fmt.Errorf("proxy provider %s has unsupported type %q", name, typeName)
+	}
+	return definition, nil
+}
+
+func requiredProviderString(config map[string]any, field string) (string, error) {
+	raw, exists := config[field]
+	if !exists {
+		return "", fmt.Errorf("field %s is required", field)
+	}
+	value, ok := raw.(string)
+	if !ok || strings.TrimSpace(value) == "" {
+		return "", fmt.Errorf("field %s must be a non-empty string", field)
+	}
+	return strings.TrimSpace(value), nil
+}
+
+func rejectProviderFields(name string, config map[string]any, fields ...string) error {
+	for _, field := range fields {
+		if _, exists := config[field]; exists {
+			return fmt.Errorf("proxy provider %s field %s conflicts with type %s", name, field, config["type"])
+		}
+	}
+	return nil
+}
+
+func parseProviderHeaders(raw any) (http.Header, error) {
+	mapping, ok := stringAnyMap(raw)
+	if !ok {
+		return nil, fmt.Errorf("must be a mapping of header names to string lists")
+	}
+	headers := make(http.Header, len(mapping))
+	for rawName, rawValues := range mapping {
+		trimmedName := strings.TrimSpace(rawName)
+		if strings.EqualFold(trimmedName, "Host") {
+			return nil, fmt.Errorf("header Host is not supported; request was not sent")
+		}
+		if !isHTTPHeaderName(trimmedName) {
+			return nil, fmt.Errorf("contains an invalid header name")
+		}
+		name := textproto.CanonicalMIMEHeaderKey(trimmedName)
+		values := make([]string, 0)
+		switch typed := rawValues.(type) {
+		case string:
+			values = append(values, typed)
+		case []string:
+			values = append(values, typed...)
+		case []any:
+			for _, rawValue := range typed {
+				value, valueOK := rawValue.(string)
+				if !valueOK {
+					return nil, fmt.Errorf("header %s contains a non-string value", name)
+				}
+				values = append(values, value)
+			}
+		default:
+			return nil, fmt.Errorf("header %s must be a string or string list", name)
+		}
+		if len(values) == 0 {
+			return nil, fmt.Errorf("header %s contains no values", name)
+		}
+		for _, value := range values {
+			if strings.ContainsAny(value, "\r\n") {
+				return nil, fmt.Errorf("header %s contains a line break", name)
+			}
+			headers.Add(name, value)
+		}
+	}
+	return headers, nil
+}
+
+func isHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' ||
+			strings.ContainsRune("!#$%&'*+-.^_`|~", rune(character)) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func strictPositiveInt64(raw any) (int64, error) {
+	var value int64
+	switch typed := raw.(type) {
+	case int:
+		value = int64(typed)
+	case int32:
+		value = int64(typed)
+	case int64:
+		value = typed
+	case uint:
+		if uint64(typed) > math.MaxInt64 {
+			return 0, fmt.Errorf("must fit in int64")
+		}
+		value = int64(typed)
+	case uint32:
+		value = int64(typed)
+	case uint64:
+		if typed > math.MaxInt64 {
+			return 0, fmt.Errorf("must fit in int64")
+		}
+		value = int64(typed)
+	default:
+		return 0, fmt.Errorf("must be an integer")
+	}
+	if value <= 0 {
+		return 0, fmt.Errorf("must be positive")
+	}
+	return value, nil
+}
+
+func parseProviderProxyConfigs(name string, body []byte) ([]map[string]any, error) {
+	rawConfig := &RawConfig{}
+	yamlErr := yaml.Unmarshal(body, rawConfig)
+	if yamlErr == nil {
+		if len(rawConfig.Proxies) > 0 {
+			return rawConfig.Proxies, nil
+		}
+		if len(rawConfig.ProviderPayload) > 0 {
+			return rawConfig.ProviderPayload, nil
+		}
+		return nil, fmt.Errorf("proxy provider %s contains no proxies", name)
+	}
+	return convertStrictProviderURIs(name, body)
+}
+
+func convertStrictProviderURIs(name string, body []byte) ([]map[string]any, error) {
+	decoded := convert.DecodeBase64(body)
+	nonEmptyLines := 0
+	for index, rawLine := range strings.Split(string(decoded), "\n") {
+		line := strings.TrimRight(rawLine, " \r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		nonEmptyLines++
+		converted, err := convert.ConvertsV2Ray([]byte(line))
+		if err != nil || len(converted) != 1 {
+			return nil, fmt.Errorf(
+				"proxy provider %s URI line %d is invalid or unsupported", name, index+1)
+		}
+	}
+	if nonEmptyLines == 0 {
+		return nil, fmt.Errorf("proxy provider %s contains no proxies", name)
+	}
+
+	converted, err := convert.ConvertsV2Ray(decoded)
+	if err != nil || len(converted) != nonEmptyLines {
+		return nil, fmt.Errorf("proxy provider %s URI list could not be converted completely", name)
+	}
+	return converted, nil
+}
+
+func providerPayloadProxyConfigs(payload any) ([]map[string]any, error) {
+	items, ok := anySlice(payload)
+	if !ok {
+		return nil, fmt.Errorf("payload must be a list")
+	}
+	configs := make([]map[string]any, 0, len(items))
+	for index, item := range items {
+		config, ok := stringAnyMap(item)
+		if !ok {
+			return nil, fmt.Errorf("payload item %d must be a mapping", index)
+		}
+		configs = append(configs, config)
+	}
+	if len(configs) == 0 {
+		return nil, fmt.Errorf("payload contains no proxies")
+	}
+	return configs, nil
+}
+
+func assignUniqueProxyNames(proxies []loadedProxy) (map[string]*CProxy, error) {
 	reservedNames := make(map[string]struct{}, len(proxies))
 	for _, item := range proxies {
+		if strings.TrimSpace(item.name) == "" || item.proxy == nil || item.proxy.Config == nil {
+			return nil, fmt.Errorf("loaded proxy from source %d has invalid naming data", item.sourceOrder)
+		}
 		reservedNames[item.name] = struct{}{}
 	}
 
@@ -398,10 +1332,75 @@ func assignUniqueProxyNames(proxies []loadedProxy) map[string]*CProxy {
 		config := cloneProxyConfig(item.proxy.Config)
 		config["name"] = name
 		item.proxy.Config = config
+		if _, exists := result[name]; exists {
+			return nil, fmt.Errorf("unique proxy name %q still collides", name)
+		}
 		result[name] = item.proxy
 		usedNames[name] = struct{}{}
 	}
-	return result
+	return result, nil
+}
+
+func validateProviderDialerProxyConfigs(
+	providerName string,
+	providerConfig map[string]any,
+	proxyConfigs []map[string]any,
+	dependency string,
+	loadErr error,
+) ([]map[string]any, string, error) {
+	if loadErr != nil {
+		return nil, "", loadErr
+	}
+	if err := rejectUnsupportedDialerProxyConfigs(
+		fmt.Sprintf("proxy provider %s", providerName), proxyConfigs); err != nil {
+		return nil, "", err
+	}
+
+	nodeName := "unknown node"
+	if len(proxyConfigs) > 0 {
+		if name, ok := stringMapValue(proxyConfigs[0], "name"); ok {
+			nodeName = name
+		}
+	}
+	if hasNonEmptyDialerProxy(providerConfig) {
+		return nil, "", fmt.Errorf(
+			"proxy provider %s node %q receives dialer-proxy from provider settings, which is not supported",
+			providerName, nodeName)
+	}
+	if rawOverride, exists := providerConfig["override"]; exists {
+		if override, ok := stringAnyMap(rawOverride); ok && hasNonEmptyDialerProxy(override) {
+			return nil, "", fmt.Errorf(
+				"proxy provider %s node %q receives dialer-proxy from provider override, which is not supported",
+				providerName, nodeName)
+		}
+	}
+	return proxyConfigs, dependency, nil
+}
+
+func rejectUnsupportedDialerProxyConfigs(scope string, proxyConfigs []map[string]any) error {
+	for index, proxyConfig := range proxyConfigs {
+		if !hasNonEmptyDialerProxy(proxyConfig) {
+			continue
+		}
+		name := fmt.Sprintf("#%d", index+1)
+		if configuredName, ok := stringMapValue(proxyConfig, "name"); ok {
+			name = configuredName
+		}
+		return fmt.Errorf("%s node %q uses dialer-proxy, which is not supported", scope, name)
+	}
+	return nil
+}
+
+func hasNonEmptyDialerProxy(config map[string]any) bool {
+	raw, exists := config["dialer-proxy"]
+	if !exists || raw == nil {
+		return false
+	}
+	value, ok := raw.(string)
+	if !ok {
+		return true
+	}
+	return strings.TrimSpace(value) != ""
 }
 
 func cloneProxyConfig(config map[string]any) map[string]any {
@@ -413,6 +1412,21 @@ func cloneProxyConfig(config map[string]any) map[string]any {
 }
 
 func prepareProviderProxyConfigs(proxies []map[string]any, providerConfig map[string]any) ([]map[string]any, error) {
+	entries, err := prepareProviderProxyConfigEntries(proxies, providerConfig)
+	if err != nil {
+		return nil, err
+	}
+	prepared := make([]map[string]any, len(entries))
+	for index, entry := range entries {
+		prepared[index] = entry.config
+	}
+	return prepared, nil
+}
+
+func prepareProviderProxyConfigEntries(
+	proxies []map[string]any,
+	providerConfig map[string]any,
+) ([]preparedProviderProxyConfig, error) {
 	filter, _ := stringMapValue(providerConfig, "filter")
 	filterRegexps, err := compileProviderRegexps(filter, true)
 	if err != nil {
@@ -429,24 +1443,29 @@ func prepareProviderProxyConfigs(proxies []map[string]any, providerConfig map[st
 		excludedTypes = strings.Split(excludeType, "|")
 	}
 
-	selected := make([]map[string]any, 0, len(proxies))
-	selectedNames := make(map[string]struct{}, len(proxies))
+	selected := make([]preparedProviderProxyConfig, 0, len(proxies))
+	selectedIndexes := make(map[int]struct{}, len(proxies))
 	for _, filterRegexp := range filterRegexps {
-		for _, proxyConfig := range proxies {
+		for proxyIndex, proxyConfig := range proxies {
 			proxyName, ok := stringMapValue(proxyConfig, "name")
 			if !ok {
 				continue
 			}
-			if _, exists := selectedNames[proxyName]; exists {
+			if _, exists := selectedIndexes[proxyIndex]; exists {
 				continue
 			}
-			if providerProxyExcluded(proxyConfig, proxyName, excludedTypes, excludeRegexps) {
+			excluded, excludeErr := providerProxyExcluded(
+				proxyConfig, proxyName, excludedTypes, excludeRegexps)
+			if excludeErr != nil {
+				return nil, excludeErr
+			}
+			if excluded {
 				continue
 			}
 			if filter != "" {
 				matches, matchErr := filterRegexp.MatchString(proxyName)
 				if matchErr != nil {
-					return nil, fmt.Errorf("match filter against proxy name: %w", matchErr)
+					return nil, providerRegexRuntimeError("Provider filter", matchErr)
 				}
 				if !matches {
 					continue
@@ -460,8 +1479,12 @@ func prepareProviderProxyConfigs(proxies []map[string]any, providerConfig map[st
 			if err := applyProviderOverrides(prepared, providerConfig["override"]); err != nil {
 				return nil, err
 			}
-			selected = append(selected, prepared)
-			selectedNames[proxyName] = struct{}{}
+			selected = append(selected, preparedProviderProxyConfig{
+				originalName:   proxyName,
+				originalConfig: cloneProxyConfig(proxyConfig),
+				config:         prepared,
+			})
+			selectedIndexes[proxyIndex] = struct{}{}
 		}
 	}
 	return selected, nil
@@ -474,7 +1497,7 @@ func compileProviderRegexps(value string, includeEmpty bool) ([]*regexp2.Regexp,
 	parts := strings.Split(value, "`")
 	regexps := make([]*regexp2.Regexp, 0, len(parts))
 	for _, part := range parts {
-		compiled, err := regexp2.Compile(part, regexp2.None)
+		compiled, err := compileProviderRegexp(part)
 		if err != nil {
 			return nil, err
 		}
@@ -488,25 +1511,44 @@ func providerProxyExcluded(
 	proxyName string,
 	excludedTypes []string,
 	excludeRegexps []*regexp2.Regexp,
-) bool {
+) (bool, error) {
 	if len(excludedTypes) > 0 {
 		proxyType, ok := stringMapValue(proxyConfig, "type")
 		if !ok {
-			return true
+			return true, nil
 		}
 		for _, excludedType := range excludedTypes {
 			if strings.EqualFold(proxyType, excludedType) {
-				return true
+				return true, nil
 			}
 		}
 	}
 	for _, excludeRegexp := range excludeRegexps {
 		matches, err := excludeRegexp.MatchString(proxyName)
-		if err == nil && matches {
-			return true
+		if err != nil {
+			return false, providerRegexRuntimeError("Provider exclude-filter", err)
+		}
+		if matches {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
+}
+
+func compileProviderRegexp(pattern string) (*regexp2.Regexp, error) {
+	compiled, err := regexp2.Compile(pattern, regexp2.None)
+	if err != nil {
+		return nil, err
+	}
+	compiled.MatchTimeout = providerRegexMatchTimeout
+	return compiled, nil
+}
+
+func providerRegexRuntimeError(operation string, err error) error {
+	if strings.Contains(strings.ToLower(err.Error()), "match timeout") {
+		return fmt.Errorf("%s exceeded the %s match timeout", operation, providerRegexMatchTimeout)
+	}
+	return fmt.Errorf("%s failed", operation)
 }
 
 func applyProviderOverrides(proxyConfig map[string]any, rawOverride any) error {
@@ -538,13 +1580,13 @@ func applyProviderOverrides(proxyConfig map[string]any, rawOverride any) error {
 			if !patternOK || !targetOK {
 				continue
 			}
-			compiled, err := regexp2.Compile(pattern, regexp2.None)
+			compiled, err := compileProviderRegexp(pattern)
 			if err != nil {
 				return fmt.Errorf("invalid proxy-name override regex: %w", err)
 			}
 			name, err = compiled.Replace(name, target, 0, -1)
 			if err != nil {
-				return fmt.Errorf("apply proxy-name override: %w", err)
+				return providerRegexRuntimeError("Provider proxy-name override", err)
 			}
 		}
 	}

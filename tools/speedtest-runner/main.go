@@ -42,6 +42,7 @@ var (
 	listConfigPath   = flag.String("list-config", "", "list nodes from a local Clash YAML file as JSON")
 	manageConfigPath = flag.String("manage-config", "", "apply local node management operations from JSON")
 	regionQueryPath  = flag.String("region-query", "", "query exit regions for node IDs from JSON")
+	prepareSources   = flag.String("prepare-sources", "", "validate and materialize provider sources from JSON")
 	versionFlag      = flag.Bool("v", false, "show version")
 )
 
@@ -102,10 +103,24 @@ type nodeManagementResult struct {
 	Nodes   []nodeEvent `json:"nodes"`
 }
 
+type sourcePreparationRequest struct {
+	Version int                        `json:"version"`
+	Sources []speedtester.ConfigSource `json:"sources"`
+}
+
 func main() {
 	flag.Parse()
 	if *versionFlag {
-		fmt.Println("speedtest-runner version 2.1.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
+		fmt.Println("speedtest-runner version 2.2.0 (clash-speedtest v1.8.8 adapted, mihomo v1.19.27)")
+		return
+	}
+	if strings.TrimSpace(*prepareSources) != "" {
+		result, err := prepareConfigSourcesFromRequest(
+			strings.TrimSpace(*prepareSources), strings.TrimSpace(*userAgent))
+		if err != nil {
+			fail("prepare sources failed: " + err.Error())
+		}
+		writeJSONResult(result)
 		return
 	}
 	if strings.TrimSpace(*listConfigPath) != "" {
@@ -308,6 +323,31 @@ func listManagedConfig(path string) (*nodeManagementResult, error) {
 		return nil, err
 	}
 	return describeManagedConfig(config, 0, 0)
+}
+
+func prepareConfigSourcesFromRequest(
+	requestPath string,
+	userAgent string,
+) (*speedtester.PreparedConfigSet, error) {
+	body, err := readFileLimited(requestPath, maxManagedFileSize)
+	if err != nil {
+		return nil, fmt.Errorf("read source preparation request: %w", err)
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(body)))
+	decoder.DisallowUnknownFields()
+	var request sourcePreparationRequest
+	if err := decoder.Decode(&request); err != nil {
+		return nil, fmt.Errorf("decode source preparation request: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("decode source preparation request: trailing JSON value")
+	}
+	if request.Version != speedtester.PreparedSourceProtocolVersion {
+		return nil, fmt.Errorf(
+			"source preparation protocol version %d is unsupported", request.Version)
+	}
+	return speedtester.PrepareConfigSources(
+		request.Sources, filepath.Dir(requestPath), userAgent)
 }
 
 func manageLocalConfig(inputPath, outputPath, requestPath string) (*nodeManagementResult, error) {

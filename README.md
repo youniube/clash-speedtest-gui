@@ -17,6 +17,8 @@ GUI 只需要以下三个文件放在同一目录：
 3. 点击“开始测速”。
 4. 完成后可复制节点 URL、Clash Meta 或节点名称；按 `F2` 可重命名节点，按 `Delete` 可从本地结果中删除已导出的节点。列表上方还可按状态、延迟、协议和已查询的出口国家组合筛选，也可以手动查询有效节点的出口地区。
 
+节点 URL 只有在生成后经生产 Mihomo 转换器重新导入为恰好一个节点，并通过全部连接关键字段的规范化语义对账，才会提供复制。当前 SS `obfs` 插件的 `mode`、`host` 可以无损回环；Trojan WebSocket 的 Host/early-data、SSR IPv6 等生产导入器不能恢复的组合会明确拒绝。一批选择中任一节点不能无损表达时，整批都不写入剪贴板，不会只复制半份结果。
+
 键盘可用 `F5` 开始测速、`F6` 查询尚未成功识别地区的有效节点，任务运行时按 `Esc` 停止。快捷键由窗口统一处理，即使焦点位于多行输入框或结果表格也会生效；下拉列表展开时，`Esc` 只关闭下拉列表，不会误停任务。
 
 | 测速方案 | 用途 | 默认流量 |
@@ -49,7 +51,13 @@ GUI 只需要以下三个文件放在同一目录：
 
 GUI 创建的是秘密（不公开列出）Gist，并不具备严格访问控制：任何拿到链接的人都可能读取其中的节点配置。`%APPDATA%\ClashSpeedTestGUI\settings.json` 也会明文保存用户选择保留的订阅/节点输入、输出路径、测速参数、GitHub 用户名和 Token；不要分享 Gist 链接、设置文件或输出 YAML。
 
-合并多个输入源时，同名但配置不同的节点不会被丢弃：第一个保留原名，后续节点自动使用 `原名 [2]`、`原名 [3]`。输出文件不得与任何本地输入配置或三个 GUI 运行程序相同，避免误覆盖原始配置或程序文件。
+合并多个输入源时，同名但配置不同的节点不会被丢弃；顶层节点与 `[Provider] 节点名` 合成名称碰撞、Provider override 把多个节点改成同名时也会保留全部配置。所有 Provider filter/override 完成后才统一唯一命名：第一个保留原名，后续节点自动使用 `原名 [2]`、`原名 [3]`，并避让用户原本就使用的编号名称。输出文件不得与任何本地输入配置、嵌套的本地 `type: file` Proxy Provider 或三个 GUI 运行程序相同；GUI 会在启动测速前和最终原子提交前分别检查，避免误覆盖原始配置、Provider 或程序文件。
+
+本地 Clash/Mihomo YAML 可以使用 `type: file` 的 Proxy Provider；相对 `path` 始终按原输入 YAML 所在目录解析。远程配置即使先落地为 GUI 临时文件，仍按不可信远程来源处理，禁止通过绝对路径、相对路径、路径穿越或 HTTP Provider 缓存 `path` 读取客户端本机文件。多个输入、远程 Provider、本地文件 Provider 或 inline Provider 中任意一个读取/解析失败时，整批测速都会失败并保留旧输出，不会跳过故障来源后生成残缺结果。
+
+HTTP Proxy Provider 支持自定义 `header`、严格的字节级 `size-limit`、标准 `proxies:`/`payload:` YAML 和 URI 列表；同一 Provider 只下载一次，后续测速使用本次受控获取的内联内容。远程或 inline 来源中的 HTTP Provider 每次实际拨号都会重新解析主机并只拨验证后的 IP 字面量；地址资格按代码中注明日期的 IANA IPv4/IPv6 Special-Purpose Address Registry 快照做最长前缀判断，`Globally Reachable=False`、空值或 N/A 的特殊用途地址会被阻止，更具体的 `True` 例外仍可使用。未列入特殊用途注册表的 global-unicast 地址也允许尝试连接；这只是安全过滤资格，并不保证地址在所有网络中实际公开可路由，IANA 注册表更新后需同步更新程序。IPv4-mapped IPv6 按其内嵌 IPv4 地址判断；本地 YAML 中由用户明确配置的 HTTP Provider 仍可连接本机或局域网服务。
+
+Provider 重定向在下一跳请求发出前检查：任何 HTTPS 到 HTTP 的降级都失败；配置了自定义 `header`、URL userinfo 或任意查询参数时，只允许 scheme、hostname 和有效端口都相同的严格同源重定向。无这些凭据的 Provider 可以跨源跳转到 CDN，但新目标请求会先清除继承的 Header 和 `Referer`（仅重新设置程序默认 User-Agent），且每一跳继续使用上述受限拨号器。当前测速器没有可安全复用的命名隧道和 age 解密上下文，因此 Provider 下载字段 `proxy`、`age-secret-key` 以及节点字段 `dialer-proxy` 都会在测速前明确失败；顶层节点、inline/file/HTTP Provider 节点或 Provider override 中只要出现非空 `dialer-proxy`，整批任务就会失败，不会伪装成普通网络测速失败或输出缺少依赖的节点。完整支持 `dialer-proxy` 需要作为独立兼容性项目同时处理依赖闭包、循环、过滤、重命名与导出引用；`type` 与 `url`、`path`、`payload` 的冲突组合也会整批失败。
 
 出口地区是 IP 数据库的近似定位，默认不查询。点击“查询有效节点出口地区”后，程序只查询本轮已导出的有效节点，并确保请求通过各自节点代理访问；依次回退 IPWHOIS.io、FreeIPAPI 和 IP.SB，不会同时向三家发送请求。结果只保存在当前界面内，不包含或保存出口 IP、ASN、运营商，不写入 YAML，重新测速后清空。勾选“按真实出口地区重命名节点”时，程序会在本地结果提交前执行同一套出口查询，成功节点按 `🇯🇵 日本 JP-01` 命名；单个查询失败保留原名，整批协议失败则全部保留原名，绝不根据入口 `server` 或旧名称猜测。
 
@@ -91,7 +99,7 @@ GUI 创建的是秘密（不公开列出）Gist，并不具备严格访问控制
 
 ## 构建产物与校验
 
-`v2.1.0` 新增 AnyTLS 分享 URL、按输出文件隔离的稳定 Gist 订阅链接，并修复筛选后批量操作与动态出口地区选项。`v2.0.0` 引入的测速事件协议 v5 和纯下载测速接口继续保持不变。正式 Windows x86_64 安装包只包含三个运行 EXE、README、GUI 使用说明和 GPL-3.0 许可证。Windows EXE 当前没有代码签名，首次运行可能出现 SmartScreen 提示，这不等同于哈希校验失败。
+`v2.2.0` 加固订阅与 Proxy Provider 的失败封闭处理，补全 Provider 下载安全、原始同名节点保留和正则超时，并加强分享 URL 无损回灌校验。`v2.1.0` 的 AnyTLS、独立 Gist 链接与动态出口地区功能保持兼容，测速事件协议继续使用 v5。正式 Windows x86_64 安装包只包含三个运行 EXE、README、GUI 使用说明和 GPL-3.0 许可证。Windows EXE 当前没有代码签名，首次运行可能出现 SmartScreen 提示，这不等同于哈希校验失败。
 
 发布者必须从干净源码构建并为三个 EXE 生成新的 SHA-256；每次重建后哈希都会变化，不能沿用旧版本。用户应把下载文件的 `Get-FileHash -Algorithm SHA256` 结果与同一 Release 公布的校验值逐个比对：
 
@@ -101,7 +109,7 @@ Get-FileHash .\Clash-SpeedTest-GUI.exe, .\subscription-parser.exe, .\speedtest-r
 
 ## 本地敏感配置
 
-真实订阅配置可能包含服务器地址、账号或密钥，不应放在源码和发布目录中。项目初始化 Git 时已忽略根目录的 `cs.yaml`、`wa.yaml`、`filtered.yaml` 和所有 EXE；原有 `cs.yaml`、`wa.yaml` 已保持内容不变并迁移到：
+真实订阅配置可能包含服务器地址、账号或密钥，不应放在源码和发布目录中。项目初始化 Git 时已忽略根目录的 `cs.yaml`、`wa.yaml`、`lin.yaml`、`ss.txt`、`ss.yaml`、`filtered.yaml` 和所有 EXE；原有 `cs.yaml`、`wa.yaml` 已保持内容不变并迁移到：
 
 ```text
 %LOCALAPPDATA%\ClashSpeedTestGUI\private-inputs\

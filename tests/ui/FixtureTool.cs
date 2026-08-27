@@ -18,6 +18,7 @@ namespace ClashSpeedTestGUI.UiFixtures
             "CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT";
         private const int SpeedProtocolVersion = 5;
         private const int RegionProtocolVersion = 2;
+        private const int SourcePreparationProtocolVersion = 1;
 
         private static readonly UTF8Encoding Utf8 = new UTF8Encoding(false, true);
         private static readonly JavaScriptSerializer Json = new JavaScriptSerializer
@@ -140,6 +141,8 @@ namespace ClashSpeedTestGUI.UiFixtures
             string[] rawArguments, StreamWriter output, StreamWriter error)
         {
             FixtureArguments arguments = FixtureArguments.Parse(rawArguments);
+            if (arguments.Has("-prepare-sources"))
+                return RunPrepareSources(arguments, output);
             if (arguments.Has("-list-config"))
                 return RunListConfig(arguments, output);
             if (arguments.Has("-region-query"))
@@ -147,6 +150,77 @@ namespace ClashSpeedTestGUI.UiFixtures
             if (arguments.Has("-manage-config"))
                 return RunManageConfig(arguments, output);
             return RunSpeedTest(arguments, output);
+        }
+
+        private static int RunPrepareSources(FixtureArguments arguments, StreamWriter output)
+        {
+            string requestPath = RequireSandboxFile(
+                arguments.Require("-prepare-sources"), "Provider 预备请求");
+            if (!File.Exists(requestPath))
+                throw new FileNotFoundException("Provider 预备请求不存在。", requestPath);
+
+            Dictionary<string, object> envelope = Json.DeserializeObject(
+                File.ReadAllText(requestPath, Utf8)) as Dictionary<string, object>;
+            if (envelope == null || envelope.Count != 2
+                || !envelope.ContainsKey("version") || !envelope.ContainsKey("sources")
+                || !(envelope["version"] is int)
+                || (int)envelope["version"] != SourcePreparationProtocolVersion)
+                throw new InvalidOperationException("Provider 预备请求协议无效。");
+
+            object[] rawSources = envelope["sources"] as object[];
+            if (rawSources == null || rawSources.Length == 0)
+                throw new InvalidOperationException("Provider 预备请求必须包含来源。");
+
+            string directory = Path.GetDirectoryName(requestPath);
+            List<string> prepared = new List<string>();
+            List<string> dependencies = new List<string>();
+            for (int index = 0; index < rawSources.Length; index++)
+            {
+                Dictionary<string, object> source = rawSources[index]
+                    as Dictionary<string, object>;
+                if (source == null || source.Count != 3
+                    || !source.ContainsKey("path") || !source.ContainsKey("origin")
+                    || !source.ContainsKey("local_dependency"))
+                    throw new InvalidOperationException("Provider 预备来源字段无效。");
+
+                string inputPath = RequireSandboxFile(source["path"] as string,
+                    "Provider 预备输入");
+                if (!File.Exists(inputPath))
+                    throw new FileNotFoundException("Provider 预备输入不存在。", inputPath);
+                string origin = source["origin"] as string;
+                string localDependency = source["local_dependency"] as string;
+                if (string.Equals(origin, "local", StringComparison.Ordinal))
+                {
+                    localDependency = RequireSandboxFile(localDependency, "Provider 本地依赖");
+                    if (!File.Exists(localDependency))
+                        throw new FileNotFoundException("Provider 本地依赖不存在。", localDependency);
+                    dependencies.Add(localDependency);
+                }
+                else if (!string.Equals(origin, "remote", StringComparison.Ordinal)
+                    && !string.Equals(origin, "inline", StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException("Provider 预备来源类型无效。");
+                }
+                else if (!string.IsNullOrWhiteSpace(localDependency))
+                {
+                    throw new InvalidOperationException("非本地来源不能声明本地依赖。");
+                }
+
+                string preparedPath = Path.Combine(directory, string.Format(
+                    CultureInfo.InvariantCulture, "materialized-fixture-{0:D3}.yaml", index + 1));
+                File.Copy(inputPath, preparedPath, false);
+                prepared.Add(preparedPath);
+            }
+
+            output.WriteLine(Json.Serialize(Dictionary(
+                "version", SourcePreparationProtocolVersion,
+                "config_paths", prepared.ToArray(),
+                "local_dependencies", dependencies.Distinct(
+                    StringComparer.OrdinalIgnoreCase).ToArray())));
+            WriteSignal("prepare-sources-completed.json", "runner", "prepare-sources",
+                "sources=" + prepared.Count.ToString(CultureInfo.InvariantCulture)
+                    + "; dependencies=" + dependencies.Count.ToString(CultureInfo.InvariantCulture));
+            return 0;
         }
 
         private static int RunListConfig(FixtureArguments arguments, StreamWriter output)

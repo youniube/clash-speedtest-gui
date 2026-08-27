@@ -5,6 +5,7 @@ go 1.24.0
 require (
 	github.com/dlclark/regexp2 v1.12.0
 	github.com/faceair/clash-speedtest v1.8.8
+	github.com/metacubex/http v0.1.6
 	github.com/metacubex/mihomo v1.19.27
 	golang.org/x/term v0.39.0
 	golang.org/x/text v0.33.0
@@ -61,7 +62,6 @@ require (
 	github.com/metacubex/gvisor v0.0.0-20251227095601-261ec1326fe8 // indirect
 	github.com/metacubex/hkdf v0.1.0 // indirect
 	github.com/metacubex/hpke v0.1.0 // indirect
-	github.com/metacubex/http v0.1.6 // indirect
 	github.com/metacubex/jsonv2 v0.0.0-20260518173308-f4597c22f1df // indirect
 	github.com/metacubex/kcp-go v0.0.0-20260105040817-550693377604 // indirect
 	github.com/metacubex/mlkem v0.1.0 // indirect

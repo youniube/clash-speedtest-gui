@@ -1,6 +1,10 @@
+param(
+    [string] $GuiPath
+)
+
 $ErrorActionPreference = 'Stop'
 
-$fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1')
+$fixture = & (Join-Path $PSScriptRoot 'prepare-ui-fixture.ps1') -GuiPath $GuiPath
 $previousRoot = $env:CLASH_SPEEDTEST_GUI_UI_FIXTURE_ROOT
 
 try {
@@ -11,9 +15,50 @@ try {
         [Text.UTF8Encoding]::new($false))
 
     $runner = Join-Path $fixture.Sandbox 'speedtest-runner.exe'
+    $prepareRequestPath = Join-Path $fixture.Sandbox 'temp\prepare-sources.json'
+    $prepareRequest = @{
+        version = 1
+        sources = @(@{
+            path = $fixture.Input
+            origin = 'local'
+            local_dependency = $fixture.Input
+        })
+    } | ConvertTo-Json -Depth 4 -Compress
+    [IO.File]::WriteAllText(
+        $prepareRequestPath,
+        $prepareRequest,
+        [Text.UTF8Encoding]::new($false))
+    $preparedJson = & $runner -prepare-sources $prepareRequestPath
+    $prepareExitCode = $LASTEXITCODE
+    if ($prepareExitCode -ne 0) {
+        throw "Fixture Provider source preparation failed with exit code $prepareExitCode."
+    }
+    $prepared = ($preparedJson -join [Environment]::NewLine) | ConvertFrom-Json
+    $preparedConfigs = @($prepared.config_paths)
+    $preparedDependencies = @($prepared.local_dependencies)
+    if ($prepared.version -ne 1) {
+        throw "Fixture Provider source preparation returned version $($prepared.version) instead of 1."
+    }
+    if ($preparedConfigs.Count -ne 1) {
+        throw "Fixture Provider source preparation returned $($preparedConfigs.Count) configs instead of 1."
+    }
+    $preparedConfig = [IO.Path]::GetFullPath([string] $preparedConfigs[0])
+    if (-not (Test-Path -LiteralPath $preparedConfig -PathType Leaf)) {
+        throw "Fixture Provider source preparation returned a missing config: $preparedConfig"
+    }
+    if ($preparedDependencies.Count -ne 1) {
+        throw "Fixture Provider source preparation returned $($preparedDependencies.Count) local dependencies instead of 1."
+    }
+    $preparedDependency = [IO.Path]::GetFullPath([string] $preparedDependencies[0])
+    $expectedDependency = [IO.Path]::GetFullPath([string] $fixture.Input)
+    if (-not [StringComparer]::OrdinalIgnoreCase.Equals(
+            $preparedDependency, $expectedDependency)) {
+        throw "Fixture Provider source preparation returned dependency '$preparedDependency' instead of '$expectedDependency'."
+    }
+
     $speedLog = Join-Path $fixture.Sandbox 'work\speed.log'
     & $runner `
-        -c $fixture.Input `
+        -c $preparedConfig `
         -speed-mode download `
         -output $fixture.Output *> $speedLog
     if ($LASTEXITCODE -ne 0) {
